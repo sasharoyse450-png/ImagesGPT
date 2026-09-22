@@ -23,12 +23,11 @@ PRIVACY_URL = 'https://telegra.ph/POLITIKA-KONFIDENCIALNOSTI-08-12-99'
 OFFER_URL   = 'https://telegra.ph/PUBLICHNAYA-OFERTA-08-12-15'
 BOT_USERNAME = 'ImagesGPT_bot'
 HISTORY_PAGE_SIZE = 10
-CAPTION_MAX = 1000   # безопасный лимит подписи под фото
+CAPTION_MAX = 1000
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
 log = logging.getLogger('ImagesGPT')
 
-# Список баннеров: ключ → человеческое имя
 BANNER_KEYS = {
     'menu':     'Главное меню',
     'balance':  'Баланс',
@@ -384,25 +383,15 @@ def delete_banner(key):
 
 def list_banners():
     rows = db().execute('SELECT key FROM banners').fetchall()
-    have = {r['key'] for r in rows}
-    return have
+    return {r['key'] for r in rows}
 
-# ─────────── универсальный показ экрана ───────────
+# ─────────── show_screen ───────────
 async def show_screen(q, context, uid, banner_key, text, kb):
-    """
-    Редактирует сообщение-триггер (q.message), решая:
-      - текст → текст (edit_text)
-      - текст → фото (edit_media)
-      - фото  → фото  (edit_media)
-      - фото  → текст (удалить и прислать заново)
-    Если баннера нет или текст слишком длинный — использует текстовый режим.
-    """
     msg = q.message
     file_id = get_banner(banner_key) if banner_key else None
     use_photo = bool(file_id) and len(text) <= CAPTION_MAX
     was_photo = bool(msg.photo)
 
-    # Фото → фото и текст → фото
     if use_photo:
         try:
             media = InputMediaPhoto(media=file_id, caption=text, parse_mode=ParseMode.HTML)
@@ -411,7 +400,6 @@ async def show_screen(q, context, uid, banner_key, text, kb):
         except Exception as e:
             log.warning('edit_media failed (%s), fallback', e)
 
-    # Фото → текст: edit_media не умеет удалять фото. Удаляем и шлём новое.
     if was_photo:
         try: await msg.delete()
         except Exception: pass
@@ -422,7 +410,6 @@ async def show_screen(q, context, uid, banner_key, text, kb):
             log.warning('send_message fallback: %s', e)
         return
 
-    # текст → текст
     try:
         await msg.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
     except Exception as e:
@@ -436,21 +423,18 @@ async def show_screen(q, context, uid, banner_key, text, kb):
             await context.bot.send_message(msg.chat_id, text,
                 parse_mode=ParseMode.HTML, reply_markup=kb)
 
-async def send_screen(bot_or_msg, chat_id, uid, banner_key, text, kb, reply_to=None):
-    """
-    Отправляет новое сообщение-экран (используется в /start и т.п.).
-    """
+async def send_screen(msg, chat_id, uid, banner_key, text, kb):
     file_id = get_banner(banner_key) if banner_key else None
     use_photo = bool(file_id) and len(text) <= CAPTION_MAX
     if use_photo:
         try:
-            await bot_or_msg.send_photo(chat_id, file_id, caption=text,
-                parse_mode=ParseMode.HTML, reply_markup=kb, reply_to_message_id=reply_to)
+            await msg.chat.send_photo(chat_id, file_id, caption=text,
+                parse_mode=ParseMode.HTML, reply_markup=kb)
             return
         except Exception as e:
             log.warning('send_photo failed: %s', e)
-    await bot_or_msg.send_message(chat_id, text,
-        parse_mode=ParseMode.HTML, reply_markup=kb, reply_to_message_id=reply_to)
+    await msg.chat.send_message(chat_id, text,
+        parse_mode=ParseMode.HTML, reply_markup=kb)
 
 # ─────────── rate limit ───────────
 _rate_log = {}
@@ -885,7 +869,7 @@ def kb_user_card(uid):
         [InlineKeyboardButton('💰 Установить монеты', callback_data=f'adm:setbal:{uid}')],
         [InlineKeyboardButton('🪙 Добавить монеты', callback_data=f'adm:addbal:{uid}')],
         [InlineKeyboardButton('💵 Начислить рубли', callback_data=f'adm:addrub:{uid}')],
-        [InlineKeyboardButton('🚫 Разбанить' if banned else '⛔ Забанить', callback_data=f'adm:ban:{uid}')],
+        [InlineKeyboardButton('🚫 Разбанить' if banned else '⛔ Забанить', callback_data=f'adm:userban:{uid}')],
         [InlineKeyboardButton('📜 История', callback_data=f'adm:hist:{uid}')],
         [InlineKeyboardButton('◀️ Назад', callback_data='adm:main')],
     ])
@@ -1232,7 +1216,6 @@ async def on_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = InlineKeyboardMarkup([[InlineKeyboardButton(t(uid,'cancel'), callback_data='cancel')]])
         await show_screen(q, context, uid, 'exchange', text, kb); return
 
-    # ── история: постраничный список ──
     if d == 'history' or d.startswith('hist:p:'):
         page = 0
         if d.startswith('hist:p:'):
@@ -1483,7 +1466,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                         reply_markup=kb_terms(uid), disable_web_page_preview=True)
         return
 
-    # ── админ: загрузка баннера ──
     if is_admin(uid) and context.user_data.get('admin_banner_upload'):
         key = context.user_data.pop('admin_banner_upload')
         if not photo:
@@ -1819,9 +1801,16 @@ async def handle_admin_cb(q, context, d):
             t_extra = f' • ⏱ {fmt_duration(r["elapsed"])}' if r['elapsed'] else ''
             lines.append(f'{i}. {icon} {html.escape(r["prompt"][:60])}\n   <i>{r["size"]} • {r["created_at"]}{t_extra}</i>')
         await q.edit_message_text('\n'.join(lines), parse_mode=ParseMode.HTML, reply_markup=kb_user_card(uid)); return
-    if d.startswith('adm:ban:'):
-        uid = int(d.split(':',2)[2])
+
+    # ── Бан/разбан пользователя (ключ adm:userban:UID) ──
+    if d.startswith('adm:userban:'):
+        tail = d.split(':',2)[2]
+        if not tail.isdigit():
+            await q.edit_message_text('❌ Некорректный ID.'); return
+        uid = int(tail)
         cur = get_user(uid)
+        if not cur:
+            await q.edit_message_text('❌ Пользователь не найден.'); return
         if cur['banned']:
             set_ban(uid, False)
             await q.edit_message_text(f'✅ <code>{uid}</code> разбанен.', parse_mode=ParseMode.HTML)
@@ -1830,18 +1819,28 @@ async def handle_admin_cb(q, context, d):
             context.user_data['admin_ban_reason'] = uid
             await q.edit_message_text(f'✍️ Причина бана <code>{uid}</code>:', parse_mode=ParseMode.HTML)
         return
+
     if d.startswith('adm:setbal:'):
-        uid = int(d.split(':',2)[2])
+        tail = d.split(':',2)[2]
+        if not tail.isdigit():
+            await q.edit_message_text('❌'); return
+        uid = int(tail)
         context.user_data['admin_setbal'] = uid
         await q.edit_message_text(f'💰 Точное значение монет <code>{uid}</code> (сейчас {balance(uid)}):',
             parse_mode=ParseMode.HTML); return
     if d.startswith('adm:addbal:'):
-        uid = int(d.split(':',2)[2])
+        tail = d.split(':',2)[2]
+        if not tail.isdigit():
+            await q.edit_message_text('❌'); return
+        uid = int(tail)
         context.user_data['admin_addbal'] = uid
         await q.edit_message_text(f'🪙 Сдвиг монет <code>{uid}</code> (сейчас {balance(uid)}):',
             parse_mode=ParseMode.HTML); return
     if d.startswith('adm:addrub:'):
-        uid = int(d.split(':',2)[2])
+        tail = d.split(':',2)[2]
+        if not tail.isdigit():
+            await q.edit_message_text('❌'); return
+        uid = int(tail)
         context.user_data['admin_addrub'] = uid
         await q.edit_message_text(
             f'💵 Сумма ₽ <code>{uid}</code> (сейчас {rub_balance(uid)} ₽):\n'
@@ -1860,7 +1859,7 @@ async def handle_admin_cb(q, context, d):
             lines.append(f'   ⏰ {r["banned_at"]}\n   💬 {html.escape(r["ban_reason"] or "—")}')
         await q.edit_message_text('\n'.join(lines), parse_mode=ParseMode.HTML, reply_markup=kb_admin()); return
 
-    # ── баннеры ──
+    # ── Баннеры (adm:ban:view:KEY, adm:ban:upload:KEY, adm:ban:del:KEY) ──
     if d == 'adm:banners':
         await q.edit_message_text(
             '🖼 <b>Баннеры экранов</b>\n━━━━━━━━━━━━━━━━━━━━\n\n'
@@ -2148,7 +2147,6 @@ async def cmd_broadcast(update, context):
         return
     await do_broadcast(context.application, update, text)
 
-# ─────────── banner commands ───────────
 async def cmd_setbanner(update, context):
     uid = update.effective_user.id
     if not is_admin(uid): return
