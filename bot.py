@@ -1,7 +1,9 @@
 import asyncio, base64, html, logging, sqlite3, time, uuid, traceback
 from datetime import datetime, timedelta
 import httpx
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
+)
 from telegram.constants import ParseMode, ChatAction
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
@@ -21,9 +23,24 @@ PRIVACY_URL = 'https://telegra.ph/POLITIKA-KONFIDENCIALNOSTI-08-12-99'
 OFFER_URL   = 'https://telegra.ph/PUBLICHNAYA-OFERTA-08-12-15'
 BOT_USERNAME = 'ImagesGPT_bot'
 HISTORY_PAGE_SIZE = 10
+CAPTION_MAX = 1000   # безопасный лимит подписи под фото
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
 log = logging.getLogger('ImagesGPT')
+
+# Список баннеров: ключ → человеческое имя
+BANNER_KEYS = {
+    'menu':     'Главное меню',
+    'balance':  'Баланс',
+    'topup':    'Пополнение',
+    'exchange': 'Обмен рублей',
+    'history':  'История',
+    'promo':    'Промокод',
+    'ref':      'Партнёрка',
+    'support':  'Поддержка',
+    'help':     'Помощь',
+    'lang':     'Язык',
+}
 
 # ─────────── translations ───────────
 LANGS = ('ru', 'en')
@@ -294,6 +311,9 @@ def init_db():
         CREATE TABLE IF NOT EXISTS admins(
             user_id INTEGER PRIMARY KEY, added_by INTEGER, added_at TEXT
         );
+        CREATE TABLE IF NOT EXISTS banners(
+            key TEXT PRIMARY KEY, file_id TEXT NOT NULL, updated_at TEXT
+        );
     ''')
     migrations = [
         'ALTER TABLE users ADD COLUMN banned INTEGER NOT NULL DEFAULT 0',
@@ -347,6 +367,90 @@ def rate_limit_count():
 def rate_limit_window():
     try: return max(5, int(setting('rate_limit_window','60')))
     except Exception: return 60
+
+# ─────────── banners ───────────
+def get_banner(key):
+    r = db().execute('SELECT file_id FROM banners WHERE key=?',(key,)).fetchone()
+    return r['file_id'] if r else None
+
+def set_banner(key, file_id):
+    c = db()
+    c.execute('INSERT OR REPLACE INTO banners(key,file_id,updated_at) VALUES(?,?,?)',
+              (key, file_id, datetime.now().isoformat(timespec='seconds')))
+    c.commit()
+
+def delete_banner(key):
+    c = db(); c.execute('DELETE FROM banners WHERE key=?',(key,)); c.commit()
+
+def list_banners():
+    rows = db().execute('SELECT key FROM banners').fetchall()
+    have = {r['key'] for r in rows}
+    return have
+
+# ─────────── универсальный показ экрана ───────────
+async def show_screen(q, context, uid, banner_key, text, kb):
+    """
+    Редактирует сообщение-триггер (q.message), решая:
+      - текст → текст (edit_text)
+      - текст → фото (edit_media)
+      - фото  → фото  (edit_media)
+      - фото  → текст (удалить и прислать заново)
+    Если баннера нет или текст слишком длинный — использует текстовый режим.
+    """
+    msg = q.message
+    file_id = get_banner(banner_key) if banner_key else None
+    use_photo = bool(file_id) and len(text) <= CAPTION_MAX
+    was_photo = bool(msg.photo)
+
+    # Фото → фото и текст → фото
+    if use_photo:
+        try:
+            media = InputMediaPhoto(media=file_id, caption=text, parse_mode=ParseMode.HTML)
+            await msg.edit_media(media=media, reply_markup=kb)
+            return
+        except Exception as e:
+            log.warning('edit_media failed (%s), fallback', e)
+
+    # Фото → текст: edit_media не умеет удалять фото. Удаляем и шлём новое.
+    if was_photo:
+        try: await msg.delete()
+        except Exception: pass
+        try:
+            await context.bot.send_message(msg.chat_id, text,
+                parse_mode=ParseMode.HTML, reply_markup=kb)
+        except Exception as e:
+            log.warning('send_message fallback: %s', e)
+        return
+
+    # текст → текст
+    try:
+        await msg.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    except Exception as e:
+        log.warning('edit_text failed (%s), fallback', e)
+        try: await msg.delete()
+        except Exception: pass
+        if use_photo:
+            await context.bot.send_photo(msg.chat_id, file_id, caption=text,
+                parse_mode=ParseMode.HTML, reply_markup=kb)
+        else:
+            await context.bot.send_message(msg.chat_id, text,
+                parse_mode=ParseMode.HTML, reply_markup=kb)
+
+async def send_screen(bot_or_msg, chat_id, uid, banner_key, text, kb, reply_to=None):
+    """
+    Отправляет новое сообщение-экран (используется в /start и т.п.).
+    """
+    file_id = get_banner(banner_key) if banner_key else None
+    use_photo = bool(file_id) and len(text) <= CAPTION_MAX
+    if use_photo:
+        try:
+            await bot_or_msg.send_photo(chat_id, file_id, caption=text,
+                parse_mode=ParseMode.HTML, reply_markup=kb, reply_to_message_id=reply_to)
+            return
+        except Exception as e:
+            log.warning('send_photo failed: %s', e)
+    await bot_or_msg.send_message(chat_id, text,
+        parse_mode=ParseMode.HTML, reply_markup=kb, reply_to_message_id=reply_to)
 
 # ─────────── rate limit ───────────
 _rate_log = {}
@@ -726,9 +830,29 @@ def kb_admin():
          InlineKeyboardButton('📢 Рассылка', callback_data='adm:broadcast')],
         [InlineKeyboardButton('🚫 Бан-лист', callback_data='adm:banlist'),
          InlineKeyboardButton('🎁 Промокоды', callback_data='adm:promos')],
+        [InlineKeyboardButton('🖼 Баннеры', callback_data='adm:banners')],
         [InlineKeyboardButton('⚙️ Настройки', callback_data='adm:settings')],
         [InlineKeyboardButton('🔄 Обновить', callback_data='adm:main')],
     ])
+
+def kb_admin_banners():
+    have = list_banners()
+    kb_rows = []
+    for key, name in BANNER_KEYS.items():
+        mark = '✅' if key in have else '⬜'
+        kb_rows.append([InlineKeyboardButton(f'{mark} {name}', callback_data=f'adm:ban:view:{key}')])
+    kb_rows.append([InlineKeyboardButton('◀️ Назад', callback_data='adm:main')])
+    return InlineKeyboardMarkup(kb_rows)
+
+def kb_banner_actions(key):
+    have = key in list_banners()
+    rows = [
+        [InlineKeyboardButton('📤 Загрузить/заменить', callback_data=f'adm:ban:upload:{key}')],
+    ]
+    if have:
+        rows.append([InlineKeyboardButton('❌ Удалить', callback_data=f'adm:ban:del:{key}')])
+    rows.append([InlineKeyboardButton('◀️ Назад', callback_data='adm:banners')])
+    return InlineKeyboardMarkup(rows)
 
 def kb_admin_settings():
     ll = setting('log_level','2')
@@ -820,6 +944,10 @@ ADMIN_HELP = (
     '<code>/setrate N</code>\n'
     '<code>/setref N</code>\n'
     '<code>/settimeout N</code>\n\n'
+    '🖼 <b>Баннеры:</b>\n'
+    '<code>/setbanner KEY</code>\n'
+    '<code>/banners</code>\n'
+    '<code>/delbanner KEY</code>\n\n'
     '👑 <b>Админы:</b>\n'
     '<code>/setadmin ID</code>\n'
     '<code>/unadmin ID</code>\n'
@@ -1024,13 +1152,14 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(terms, parse_mode=ParseMode.HTML,
                                         reply_markup=kb_terms(u.id), disable_web_page_preview=True)
         return
-    await update.message.reply_text(main_text(u.id), parse_mode=ParseMode.HTML, reply_markup=kb_menu(u.id))
+    await send_screen(update.message, update.effective_chat.id, u.id,
+                      'menu', main_text(u.id), kb_menu(u.id))
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    await update.message.reply_text(
-        f'{t(uid,"help_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n' + t(uid,'help_text', percent=ref_percent()),
-        parse_mode=ParseMode.HTML, reply_markup=kb_menu(uid))
+    text = f'{t(uid,"help_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n' + t(uid,'help_text', percent=ref_percent())
+    await send_screen(update.message, update.effective_chat.id, uid,
+                      'help', text, kb_menu(uid))
 
 async def on_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -1042,78 +1171,66 @@ async def on_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if d == 'terms:accept':
         accept_terms(uid)
-        await q.edit_message_text(t(uid,'terms_accepted')+'\n\n'+main_text(uid),
-                                  parse_mode=ParseMode.HTML, reply_markup=kb_menu(uid))
+        await show_screen(q, context, uid, 'menu',
+                          t(uid,'terms_accepted')+'\n\n'+main_text(uid), kb_menu(uid))
         return
     if d == 'terms:reject':
-        await q.edit_message_text(t(uid,'terms_rejected'), parse_mode=ParseMode.HTML)
+        await show_screen(q, context, uid, None,
+                          t(uid,'terms_rejected'), None)
         return
     if is_banned(uid):
-        await q.edit_message_text(t(uid,'banned_access')); return
+        await show_screen(q, context, uid, None, t(uid,'banned_access'), None); return
     if not has_accepted(uid):
-        await q.edit_message_text(t(uid,'terms_first')); return
+        await show_screen(q, context, uid, None, t(uid,'terms_first'), None); return
 
     if d == 'menu':
-        await q.edit_message_text(main_text(uid), parse_mode=ParseMode.HTML, reply_markup=kb_menu(uid)); return
+        await show_screen(q, context, uid, 'menu', main_text(uid), kb_menu(uid)); return
     if d == 'help':
-        await q.edit_message_text(
-            f'{t(uid,"help_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n' + t(uid,'help_text', percent=ref_percent()),
-            parse_mode=ParseMode.HTML, reply_markup=kb_menu(uid)); return
+        text = f'{t(uid,"help_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n' + t(uid,'help_text', percent=ref_percent())
+        await show_screen(q, context, uid, 'help', text, kb_menu(uid)); return
 
     if d == 'lang':
-        await q.edit_message_text(
-            f'{t(uid,"lang_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n'
-            f'{t(uid,"lang_current")}: <b>{LANGS_NAMES.get(get_lang(uid),"")}</b>',
-            parse_mode=ParseMode.HTML, reply_markup=kb_lang(uid))
-        return
+        text = (f'{t(uid,"lang_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n'
+                f'{t(uid,"lang_current")}: <b>{LANGS_NAMES.get(get_lang(uid),"")}</b>')
+        await show_screen(q, context, uid, 'lang', text, kb_lang(uid)); return
     if d.startswith('lang:set:'):
         new_lang = d.split(':',2)[2]
         set_lang(uid, new_lang)
-        await q.edit_message_text(
+        await show_screen(q, context, uid, 'menu',
             f'{t(uid,"lang_switched", lang=LANGS_NAMES.get(new_lang,new_lang))}\n\n' + main_text(uid),
-            parse_mode=ParseMode.HTML, reply_markup=kb_menu(uid))
-        return
+            kb_menu(uid)); return
 
     if d == 'balance':
-        await q.edit_message_text(
-            f'{t(uid,"your_balance")}\n\n'
-            f'💵 {t(uid,"rubles")}: <b>{rub_balance(uid)} ₽</b>\n'
-            f'🪙 {t(uid,"coins")}: <b>{balance(uid)}</b>\n\n'
-            f'📊 {t(uid,"rate")}: <b>1 🪙 = {coin_rate()} ₽</b>',
-            parse_mode=ParseMode.HTML, reply_markup=kb_balance(uid))
-        return
+        text = (f'{t(uid,"your_balance")}\n\n'
+                f'💵 {t(uid,"rubles")}: <b>{rub_balance(uid)} ₽</b>\n'
+                f'🪙 {t(uid,"coins")}: <b>{balance(uid)}</b>\n\n'
+                f'📊 {t(uid,"rate")}: <b>1 🪙 = {coin_rate()} ₽</b>')
+        await show_screen(q, context, uid, 'balance', text, kb_balance(uid)); return
 
     if d == 'topup':
-        await q.edit_message_text(
-            f'{t(uid,"topup_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n'
-            f'📊 {t(uid,"rate")}: <b>1 🪙 = {coin_rate()} ₽</b>\n'
-            f'💵 {t(uid,"rubles")}: <b>{rub_balance(uid)} ₽</b>\n\n'
-            f'{t(uid,"topup_note")}',
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(t(uid,'support_btn'), callback_data='support:new')],
-                [InlineKeyboardButton(t(uid,'back'), callback_data='balance')],
-            ]))
-        return
+        text = (f'{t(uid,"topup_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n'
+                f'📊 {t(uid,"rate")}: <b>1 🪙 = {coin_rate()} ₽</b>\n'
+                f'💵 {t(uid,"rubles")}: <b>{rub_balance(uid)} ₽</b>\n\n'
+                f'{t(uid,"topup_note")}')
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(t(uid,'support_btn'), callback_data='support:new')],
+            [InlineKeyboardButton(t(uid,'back'), callback_data='balance')],
+        ])
+        await show_screen(q, context, uid, 'topup', text, kb); return
 
     if d == 'exchange':
-        rb = rub_balance(uid)
-        rate = coin_rate()
+        rb = rub_balance(uid); rate = coin_rate()
         if rb < rate:
-            await q.edit_message_text(
-                f'{t(uid,"not_enough_rub")}\n\n{t(uid,"min_exchange")}: <b>{rate} ₽</b>\n{t(uid,"you_have")}: <b>{rb} ₽</b>',
-                parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(uid,'back'), callback_data='balance')]]))
-            return
+            text = f'{t(uid,"not_enough_rub")}\n\n{t(uid,"min_exchange")}: <b>{rate} ₽</b>\n{t(uid,"you_have")}: <b>{rb} ₽</b>'
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton(t(uid,'back'), callback_data='balance')]])
+            await show_screen(q, context, uid, 'exchange', text, kb); return
         context.user_data['waiting'] = 'exchange_rub'
-        await q.edit_message_text(
-            f'{t(uid,"exchange_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n'
-            f'📊 {t(uid,"rate")}: <b>1 🪙 = {rate} ₽</b>\n'
-            f'💵 {t(uid,"you_have")}: <b>{rb} ₽</b>\n\n'
-            f'{t(uid,"exchange_ask")}\n<i>{t(uid,"exchange_must_be_multiple", rate=rate)}</i>',
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(uid,'cancel'), callback_data='cancel')]]))
-        return
+        text = (f'{t(uid,"exchange_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n'
+                f'📊 {t(uid,"rate")}: <b>1 🪙 = {rate} ₽</b>\n'
+                f'💵 {t(uid,"you_have")}: <b>{rb} ₽</b>\n\n'
+                f'{t(uid,"exchange_ask")}\n<i>{t(uid,"exchange_must_be_multiple", rate=rate)}</i>')
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton(t(uid,'cancel'), callback_data='cancel')]])
+        await show_screen(q, context, uid, 'exchange', text, kb); return
 
     # ── история: постраничный список ──
     if d == 'history' or d.startswith('hist:p:'):
@@ -1123,8 +1240,8 @@ async def on_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception: page = 0
         total = user_history_total(uid)
         if total == 0:
-            await q.edit_message_text(t(uid,'history_empty'), parse_mode=ParseMode.HTML, reply_markup=kb_menu(uid))
-            return
+            await show_screen(q, context, uid, 'history',
+                              t(uid,'history_empty'), kb_menu(uid)); return
         page_size = HISTORY_PAGE_SIZE
         total_pages = max(1, (total + page_size - 1) // page_size)
         page = max(0, min(page, total_pages - 1))
@@ -1136,8 +1253,8 @@ async def on_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines.append(f'<b>{num}.</b> {icon} {html.escape(r["prompt"][:60])}')
         lines.append('')
         lines.append(t(uid,'history_hint'))
-        await q.edit_message_text('\n'.join(lines), parse_mode=ParseMode.HTML,
-                                  reply_markup=kb_history(uid, page, total))
+        await show_screen(q, context, uid, 'history',
+                          '\n'.join(lines), kb_history(uid, page, total))
         return
 
     if d == 'hist:noop':
@@ -1183,42 +1300,41 @@ async def on_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f'{t(uid,"ref_earned")}: <b>{earned} ₽</b>\n\n'
             f'{t(uid,"ref_note")}'
         )
-        await q.edit_message_text(text, parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(t(uid,'ref_share'), url=f'https://t.me/share/url?url={ref_link(uid)}&text=ImagesGPT')],
-                [InlineKeyboardButton(t(uid,'back_menu'), callback_data='menu')],
-            ]))
-        return
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(t(uid,'ref_share'), url=f'https://t.me/share/url?url={ref_link(uid)}&text=ImagesGPT')],
+            [InlineKeyboardButton(t(uid,'back_menu'), callback_data='menu')],
+        ])
+        await show_screen(q, context, uid, 'ref', text, kb); return
 
     if d == 'promo':
         context.user_data['waiting'] = 'promo'
-        await q.edit_message_text(t(uid,'promo_ask'), parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(uid,'back_menu'), callback_data='menu')]])); return
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton(t(uid,'back_menu'), callback_data='menu')]])
+        await show_screen(q, context, uid, 'promo', t(uid,'promo_ask'), kb); return
 
     if d == 'support':
         tid = get_open_ticket(uid)
         txt = f'{t(uid,"support_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n'
         txt += t(uid,'support_open_exists',tid=tid) if tid else t(uid,'support_desc')
-        await q.edit_message_text(txt, parse_mode=ParseMode.HTML, reply_markup=kb_support(uid, tid)); return
+        await show_screen(q, context, uid, 'support', txt, kb_support(uid, tid)); return
     if d == 'support:new':
         context.user_data['waiting'] = 'ticket'
-        await q.edit_message_text(t(uid,'support_create_ask'), parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(uid,'cancel'), callback_data='support')]])); return
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton(t(uid,'cancel'), callback_data='support')]])
+        await show_screen(q, context, uid, 'support', t(uid,'support_create_ask'), kb); return
     if d == 'support:list':
         rows = list_user_tickets(uid)
         tid = get_open_ticket(uid)
         if not rows:
-            await q.edit_message_text(t(uid,'support_none'), reply_markup=kb_support(uid, tid)); return
+            await show_screen(q, context, uid, 'support', t(uid,'support_none'), kb_support(uid, tid)); return
         lines = [t(uid,'support_my_title'), '━━━━━━━━━━━━━━━━━━━━', '']
         for r in rows:
             icon = '🟢' if r['status'] == 'open' else '⚪'
             lines.append(f'{icon} <b>#{r["id"]}</b> • {r["status"]} • {r["updated_at"]}')
-        await q.edit_message_text('\n'.join(lines), parse_mode=ParseMode.HTML, reply_markup=kb_support(uid, tid)); return
+        await show_screen(q, context, uid, 'support', '\n'.join(lines), kb_support(uid, tid)); return
     if d.startswith('support:view:'):
         tid = int(d.split(':',2)[2])
         t_ = get_ticket(tid)
         if not t_ or t_['user_id'] != uid:
-            await q.edit_message_text('❌', reply_markup=kb_support(uid, get_open_ticket(uid))); return
+            await show_screen(q, context, uid, 'support', '❌', kb_support(uid, get_open_ticket(uid))); return
         await render_ticket_to_user(q, context, tid)
         return
     if d.startswith('support:close:'):
@@ -1226,7 +1342,8 @@ async def on_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         t_ = get_ticket(tid)
         if not t_ or t_['user_id'] != uid: return
         close_ticket(tid)
-        await q.edit_message_text(t(uid,'ticket_closed', tid=tid), reply_markup=kb_support(uid, get_open_ticket(uid)))
+        await show_screen(q, context, uid, 'support',
+            t(uid,'ticket_closed', tid=tid), kb_support(uid, get_open_ticket(uid)))
         await alog(context.application, f'⚪ Пользователь <code>{uid}</code> закрыл тикет #{tid}.', level=2)
         return
 
@@ -1265,57 +1382,52 @@ async def on_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     pending_jobs.pop(i); refunded = True; break
         if refunded:
             change_balance(uid, int(setting('image_cost','1')))
-            await q.edit_message_text(
-                f'❌ {t(uid,"queue_cancel")}\n\n💰 {balance(uid)} 🪙',
-                parse_mode=ParseMode.HTML, reply_markup=kb_menu(uid))
+            await show_screen(q, context, uid, 'menu',
+                f'❌ {t(uid,"queue_cancel")}\n\n💰 {balance(uid)} 🪙', kb_menu(uid))
         else:
-            await q.edit_message_text('❌', reply_markup=kb_menu(uid))
+            await show_screen(q, context, uid, 'menu', '❌', kb_menu(uid))
         return
 
     if d == 'create':
         ok, wait = check_rate(uid)
         if not ok:
-            await q.edit_message_text(t(uid,'rate_limit', sec=wait),
-                parse_mode=ParseMode.HTML, reply_markup=kb_menu(uid))
+            await show_screen(q, context, uid, 'menu',
+                t(uid,'rate_limit', sec=wait), kb_menu(uid))
             return
         cost = int(setting('image_cost','1'))
         if balance(uid) < cost:
-            await q.edit_message_text(
-                f'{t(uid,"insufficient_coins")}\n\n{t(uid,"need_coins", need=cost, have=balance(uid))}',
-                parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(t(uid,'exchange_btn'), callback_data='exchange')],
-                    [InlineKeyboardButton(t(uid,'back_menu'), callback_data='menu')],
-                ]))
-            return
+            text = f'{t(uid,"insufficient_coins")}\n\n{t(uid,"need_coins", need=cost, have=balance(uid))}'
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton(t(uid,'exchange_btn'), callback_data='exchange')],
+                [InlineKeyboardButton(t(uid,'back_menu'), callback_data='menu')],
+            ])
+            await show_screen(q, context, uid, 'menu', text, kb); return
         context.user_data['waiting'] = 'image'
-        await q.edit_message_text(t(uid,'create_prompt'), parse_mode=ParseMode.HTML,
-                                  reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(uid,'cancel'), callback_data='cancel')]]))
-        return
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton(t(uid,'cancel'), callback_data='cancel')]])
+        await show_screen(q, context, uid, None, t(uid,'create_prompt'), kb); return
     if d == 'cancel':
         context.user_data.pop('waiting', None)
-        await q.edit_message_text('❌', reply_markup=kb_menu(uid)); return
+        await show_screen(q, context, uid, 'menu', '❌', kb_menu(uid)); return
     if d.startswith('size:'):
         p = context.user_data.get('prompt')
         if not p:
-            await q.edit_message_text('❌', reply_markup=kb_menu(uid)); return
+            await show_screen(q, context, uid, 'menu', '❌', kb_menu(uid)); return
         token = str(uuid.uuid4())
         context.user_data['pending'] = {token: (p, d.split(':',1)[1])}
         cost = int(setting('image_cost','1'))
-        await q.edit_message_text(
-            f'{t(uid,"confirm_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n'
-            f'📝 {html.escape(p[:500])}\n\n'
-            f'📐 {d.split(":",1)[1]}\n'
-            f'💰 {cost} 🪙\n\n',
-            parse_mode=ParseMode.HTML, reply_markup=kb_confirm(uid, token)); return
+        text = (f'{t(uid,"confirm_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n'
+                f'📝 {html.escape(p[:500])}\n\n'
+                f'📐 {d.split(":",1)[1]}\n'
+                f'💰 {cost} 🪙\n\n')
+        await show_screen(q, context, uid, None, text, kb_confirm(uid, token)); return
     if d.startswith('ok:'):
         token = d[3:]
         item = context.user_data.get('pending',{}).pop(token, None)
         if not item:
-            await q.edit_message_text('❌', reply_markup=kb_menu(uid)); return
+            await show_screen(q, context, uid, 'menu', '❌', kb_menu(uid)); return
         cost = int(setting('image_cost','1'))
         if balance(uid) < cost:
-            await q.edit_message_text(t(uid,'insufficient_coins'), reply_markup=kb_menu(uid)); return
+            await show_screen(q, context, uid, 'menu', t(uid,'insufficient_coins'), kb_menu(uid)); return
         change_balance(uid, -cost)
         p, size = item
         job_id = str(uuid.uuid4())
@@ -1325,16 +1437,14 @@ async def on_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
                    'prompt': p, 'size': size, 'msg_id': q.message.message_id,
                    'last_pos': pos, 'cancelled': False}
             pending_jobs.append(job)
-        await q.edit_message_text(
-            f'{t(uid,"queue_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n'
-            f'📐 {size}\n'
-            f'📝 {html.escape(p[:120])}\n\n'
-            f'{t(uid,"queue_pos")}: <b>{pos}</b>',
-            parse_mode=ParseMode.HTML, reply_markup=kb_queue_cancel(uid, job_id))
-        return
+        text = (f'{t(uid,"queue_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n'
+                f'📐 {size}\n'
+                f'📝 {html.escape(p[:120])}\n\n'
+                f'{t(uid,"queue_pos")}: <b>{pos}</b>')
+        await show_screen(q, context, uid, None, text, kb_queue_cancel(uid, job_id)); return
     if d.startswith('no:'):
         context.user_data.pop('waiting', None)
-        await q.edit_message_text('❌', reply_markup=kb_menu(uid)); return
+        await show_screen(q, context, uid, 'menu', '❌', kb_menu(uid)); return
 
 async def render_ticket_to_user(q, context, tid):
     uid = q.from_user.id
@@ -1348,7 +1458,7 @@ async def render_ticket_to_user(q, context, tid):
         lines.append(f'{who} <i>{m["created_at"]}</i>\n{html.escape(body)}')
         if m['photo_file_id']: photos.append((m['photo_file_id'], f'#{tid}'))
     kb = kb_ticket_user(uid, tid) if t_['status'] == 'open' else kb_support(uid, get_open_ticket(uid))
-    await q.edit_message_text('\n\n'.join(lines), parse_mode=ParseMode.HTML, reply_markup=kb)
+    await show_screen(q, context, uid, 'support', '\n\n'.join(lines), kb)
     for fid, cap in photos[-5:]:
         try: await context.bot.send_photo(q.message.chat_id, fid, caption=cap)
         except Exception: pass
@@ -1371,6 +1481,19 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             note=t(uid,'terms_note'))
         await update.message.reply_text(terms, parse_mode=ParseMode.HTML,
                                         reply_markup=kb_terms(uid), disable_web_page_preview=True)
+        return
+
+    # ── админ: загрузка баннера ──
+    if is_admin(uid) and context.user_data.get('admin_banner_upload'):
+        key = context.user_data.pop('admin_banner_upload')
+        if not photo:
+            await update.message.reply_text('❌ Пришли изображение.')
+            return
+        set_banner(key, photo)
+        await update.message.reply_text(
+            f'✅ Баннер <b>{BANNER_KEYS.get(key,key)}</b> сохранён.',
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_banner_actions(key))
         return
 
     if is_admin(uid) and context.user_data.get('admin_reply_ticket'):
@@ -1535,13 +1658,12 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg = {'bad_amount':'❌','not_multiple':t(uid,'exchange_must_be_multiple',rate=coin_rate()),
                    'not_enough_rub':t(uid,'not_enough_rub')}.get(res,'❌')
             await update.message.reply_text(msg, reply_markup=kb_menu(uid)); return
-        await update.message.reply_text(
-            f'{t(uid,"exchange_done")}\n━━━━━━━━━━━━━━━━━━━━\n\n'
-            f'💵 {t(uid,"exchange_spent")}: <b>{rub} ₽</b>\n'
-            f'🪙 {t(uid,"exchange_got")}: <b>+{res} 🪙</b>\n\n'
-            f'💵 {t(uid,"rubles")}: <b>{rub_balance(uid)} ₽</b>\n'
-            f'🪙 {t(uid,"coins")}: <b>{balance(uid)}</b>',
-            parse_mode=ParseMode.HTML, reply_markup=kb_menu(uid))
+        text_r = (f'{t(uid,"exchange_done")}\n━━━━━━━━━━━━━━━━━━━━\n\n'
+                  f'💵 {t(uid,"exchange_spent")}: <b>{rub} ₽</b>\n'
+                  f'🪙 {t(uid,"exchange_got")}: <b>+{res} 🪙</b>\n\n'
+                  f'💵 {t(uid,"rubles")}: <b>{rub_balance(uid)} ₽</b>\n'
+                  f'🪙 {t(uid,"coins")}: <b>{balance(uid)}</b>')
+        await update.message.reply_text(text_r, parse_mode=ParseMode.HTML, reply_markup=kb_menu(uid))
         return
 
     if waiting == 'promo':
@@ -1737,6 +1859,37 @@ async def handle_admin_cb(q, context, d):
             lines.append(f'<code>{r["user_id"]}</code> • {html.escape(r["full_name"] or "—")}')
             lines.append(f'   ⏰ {r["banned_at"]}\n   💬 {html.escape(r["ban_reason"] or "—")}')
         await q.edit_message_text('\n'.join(lines), parse_mode=ParseMode.HTML, reply_markup=kb_admin()); return
+
+    # ── баннеры ──
+    if d == 'adm:banners':
+        await q.edit_message_text(
+            '🖼 <b>Баннеры экранов</b>\n━━━━━━━━━━━━━━━━━━━━\n\n'
+            '✅ — загружен, ⬜ — нет.\n'
+            'Открой нужный и загрузи картинку.\n\n'
+            '<i>Рекомендуемый размер: 1280×640 или 1024×512.</i>',
+            parse_mode=ParseMode.HTML, reply_markup=kb_admin_banners()); return
+    if d.startswith('adm:ban:view:'):
+        key = d.split(':',3)[3]
+        name = BANNER_KEYS.get(key, key)
+        have = key in list_banners()
+        status = '✅ загружен' if have else '⬜ не загружен'
+        text = f'🖼 <b>{name}</b>\n\n{status}'
+        await q.edit_message_text(text, parse_mode=ParseMode.HTML,
+                                  reply_markup=kb_banner_actions(key)); return
+    if d.startswith('adm:ban:upload:'):
+        key = d.split(':',3)[3]
+        context.user_data['admin_banner_upload'] = key
+        name = BANNER_KEYS.get(key, key)
+        await q.edit_message_text(
+            f'📤 Пришли картинку для баннера <b>{name}</b>.\n\n'
+            f'Рекомендую 1280×640 или 1024×512.',
+            parse_mode=ParseMode.HTML); return
+    if d.startswith('adm:ban:del:'):
+        key = d.split(':',3)[3]
+        delete_banner(key)
+        await q.edit_message_text(f'❌ Баннер удалён.', parse_mode=ParseMode.HTML,
+                                  reply_markup=kb_banner_actions(key)); return
+
     if d == 'adm:promos':
         context.user_data.pop('promo_step', None)
         context.user_data.pop('promo_data', None)
@@ -1995,6 +2148,48 @@ async def cmd_broadcast(update, context):
         return
     await do_broadcast(context.application, update, text)
 
+# ─────────── banner commands ───────────
+async def cmd_setbanner(update, context):
+    uid = update.effective_user.id
+    if not is_admin(uid): return
+    if not context.args:
+        keys_list = '\n'.join(f'• <code>{k}</code> — {v}' for k, v in BANNER_KEYS.items())
+        await update.message.reply_text(
+            f'🖼 <b>Баннеры</b>\n\nИспользование: <code>/setbanner KEY</code>\n\n'
+            f'<b>Доступные ключи:</b>\n{keys_list}\n\n'
+            f'Пример: <code>/setbanner menu</code>',
+            parse_mode=ParseMode.HTML)
+        return
+    key = context.args[0].lower()
+    if key not in BANNER_KEYS:
+        await update.message.reply_text(f'❌ Ключ <code>{key}</code> не найден.', parse_mode=ParseMode.HTML); return
+    context.user_data['admin_banner_upload'] = key
+    await update.message.reply_text(
+        f'📤 Пришли картинку для баннера <b>{BANNER_KEYS[key]}</b>.\n'
+        f'Рекомендую 1280×640 или 1024×512.',
+        parse_mode=ParseMode.HTML)
+
+async def cmd_banners(update, context):
+    if not is_admin(update.effective_user.id): return
+    have = list_banners()
+    lines = ['🖼 <b>Баннеры экранов</b>', '━━━━━━━━━━━━━━━━━━━━', '']
+    for key, name in BANNER_KEYS.items():
+        mark = '✅' if key in have else '⬜'
+        lines.append(f'{mark} <code>{key}</code> — {name}')
+    lines.append('')
+    lines.append('<i>Управление: /admin → 🖼 Баннеры</i>')
+    await update.message.reply_text('\n'.join(lines), parse_mode=ParseMode.HTML)
+
+async def cmd_delbanner(update, context):
+    if not is_admin(update.effective_user.id): return
+    if not context.args:
+        await update.message.reply_text('Использование: /delbanner KEY'); return
+    key = context.args[0].lower()
+    if key not in BANNER_KEYS:
+        await update.message.reply_text('❌ Неизвестный ключ.'); return
+    delete_banner(key)
+    await update.message.reply_text(f'❌ Баннер <b>{BANNER_KEYS[key]}</b> удалён.', parse_mode=ParseMode.HTML)
+
 # ─────────── lifecycle ───────────
 async def post_init(app):
     init_db()
@@ -2002,11 +2197,14 @@ async def post_init(app):
     for _ in range(n):
         workers.append(asyncio.create_task(worker(app)))
     workers.append(asyncio.create_task(queue_position_updater(app)))
+    banners_have = list_banners()
+    banners_line = f'\n🖼 Баннеров: <code>{len(banners_have)}/{len(BANNER_KEYS)}</code>'
     await alog(app,
         f'🟢 <b>ImagesGPT запущен</b>\n👷 Воркеров: <code>{n}</code>\n'
         f'🎨 <code>{IMAGE_MODEL}</code>\n⏱ Таймаут: <code>{fmt_timeout()}</code>\n'
         f'📊 Курс: <code>1 🪙 = {coin_rate()} ₽</code>\n💸 Реф: <code>{ref_percent()}%</code>\n'
-        f'⏳ Rate-limit: <code>{rate_limit_count()}/{rate_limit_window()}с</code>',
+        f'⏳ Rate-limit: <code>{rate_limit_count()}/{rate_limit_window()}с</code>'
+        f'{banners_line}',
         level=1)
 
 async def post_shutdown(app):
@@ -2051,6 +2249,9 @@ def build_app():
     app.add_handler(CommandHandler('setref', cmd_setref))
     app.add_handler(CommandHandler('settimeout', cmd_settimeout))
     app.add_handler(CommandHandler('broadcast', cmd_broadcast))
+    app.add_handler(CommandHandler('setbanner', cmd_setbanner))
+    app.add_handler(CommandHandler('banners', cmd_banners))
+    app.add_handler(CommandHandler('delbanner', cmd_delbanner))
     app.add_handler(CallbackQueryHandler(on_callbacks))
     app.add_handler(MessageHandler((filters.TEXT & ~filters.COMMAND) | filters.PHOTO, on_message))
     app.add_error_handler(on_error)
