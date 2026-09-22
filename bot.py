@@ -423,18 +423,19 @@ async def show_screen(q, context, uid, banner_key, text, kb):
             await context.bot.send_message(msg.chat_id, text,
                 parse_mode=ParseMode.HTML, reply_markup=kb)
 
-async def send_screen(msg, chat_id, uid, banner_key, text, kb):
+async def send_screen(update, uid, banner_key, text, kb):
+    """Отправляет новое сообщение-экран (для /start, /help и т.п.)."""
     file_id = get_banner(banner_key) if banner_key else None
     use_photo = bool(file_id) and len(text) <= CAPTION_MAX
+    chat = update.effective_chat
     if use_photo:
         try:
-            await msg.chat.send_photo(chat_id, file_id, caption=text,
+            await chat.send_photo(file_id, caption=text,
                 parse_mode=ParseMode.HTML, reply_markup=kb)
             return
         except Exception as e:
             log.warning('send_photo failed: %s', e)
-    await msg.chat.send_message(chat_id, text,
-        parse_mode=ParseMode.HTML, reply_markup=kb)
+    await chat.send_message(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 # ─────────── rate limit ───────────
 _rate_log = {}
@@ -1136,14 +1137,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(terms, parse_mode=ParseMode.HTML,
                                         reply_markup=kb_terms(u.id), disable_web_page_preview=True)
         return
-    await send_screen(update.message, update.effective_chat.id, u.id,
-                      'menu', main_text(u.id), kb_menu(u.id))
+    await send_screen(update, u.id, 'menu', main_text(u.id), kb_menu(u.id))
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     text = f'{t(uid,"help_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n' + t(uid,'help_text', percent=ref_percent())
-    await send_screen(update.message, update.effective_chat.id, uid,
-                      'help', text, kb_menu(uid))
+    await send_screen(update, uid, 'help', text, kb_menu(uid))
 
 async def on_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -1791,7 +1790,9 @@ async def handle_admin_cb(q, context, d):
         context.user_data['admin_user_lookup'] = True
         await q.edit_message_text('👥 Отправь ID пользователя:'); return
     if d.startswith('adm:hist:'):
-        uid = int(d.split(':',2)[2])
+        tail = d.split(':',2)[2]
+        if not tail.isdigit(): await q.edit_message_text('❌'); return
+        uid = int(tail)
         rows = user_history(uid, 20)
         if not rows:
             await q.edit_message_text('📜 История пуста.', reply_markup=kb_user_card(uid)); return
@@ -1802,7 +1803,6 @@ async def handle_admin_cb(q, context, d):
             lines.append(f'{i}. {icon} {html.escape(r["prompt"][:60])}\n   <i>{r["size"]} • {r["created_at"]}{t_extra}</i>')
         await q.edit_message_text('\n'.join(lines), parse_mode=ParseMode.HTML, reply_markup=kb_user_card(uid)); return
 
-    # ── Бан/разбан пользователя (ключ adm:userban:UID) ──
     if d.startswith('adm:userban:'):
         tail = d.split(':',2)[2]
         if not tail.isdigit():
@@ -1822,24 +1822,21 @@ async def handle_admin_cb(q, context, d):
 
     if d.startswith('adm:setbal:'):
         tail = d.split(':',2)[2]
-        if not tail.isdigit():
-            await q.edit_message_text('❌'); return
+        if not tail.isdigit(): await q.edit_message_text('❌'); return
         uid = int(tail)
         context.user_data['admin_setbal'] = uid
         await q.edit_message_text(f'💰 Точное значение монет <code>{uid}</code> (сейчас {balance(uid)}):',
             parse_mode=ParseMode.HTML); return
     if d.startswith('adm:addbal:'):
         tail = d.split(':',2)[2]
-        if not tail.isdigit():
-            await q.edit_message_text('❌'); return
+        if not tail.isdigit(): await q.edit_message_text('❌'); return
         uid = int(tail)
         context.user_data['admin_addbal'] = uid
         await q.edit_message_text(f'🪙 Сдвиг монет <code>{uid}</code> (сейчас {balance(uid)}):',
             parse_mode=ParseMode.HTML); return
     if d.startswith('adm:addrub:'):
         tail = d.split(':',2)[2]
-        if not tail.isdigit():
-            await q.edit_message_text('❌'); return
+        if not tail.isdigit(): await q.edit_message_text('❌'); return
         uid = int(tail)
         context.user_data['admin_addrub'] = uid
         await q.edit_message_text(
@@ -1859,7 +1856,6 @@ async def handle_admin_cb(q, context, d):
             lines.append(f'   ⏰ {r["banned_at"]}\n   💬 {html.escape(r["ban_reason"] or "—")}')
         await q.edit_message_text('\n'.join(lines), parse_mode=ParseMode.HTML, reply_markup=kb_admin()); return
 
-    # ── Баннеры (adm:ban:view:KEY, adm:ban:upload:KEY, adm:ban:del:KEY) ──
     if d == 'adm:banners':
         await q.edit_message_text(
             '🖼 <b>Баннеры экранов</b>\n━━━━━━━━━━━━━━━━━━━━\n\n'
