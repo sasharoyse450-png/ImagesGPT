@@ -1,0 +1,2050 @@
+import asyncio, base64, html, logging, sqlite3, time, uuid, traceback
+from datetime import datetime, timedelta
+import httpx
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.constants import ParseMode, ChatAction
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler,
+    CallbackQueryHandler, ContextTypes, filters
+)
+
+# ─────────── config ───────────
+BOT_TOKEN  = '8979688376:AAG_QM3t0NKOEiieC3_38wvb-ZsmziaXzRE'
+ADMIN_ID   = 8130244626
+API_KEY    = 'tc_live_6a7075340c595455d423a0471dc7a534d8450dddd9c6de39'
+API_BASE   = 'https://tooken.club/v1'
+IMAGE_MODEL      = 'gpt-image-2'
+MODERATION_MODEL = 'deepseek-v4-flash'
+TIMEOUT_DEFAULT  = 600
+DB         = 'gptimages.db'
+PRIVACY_URL = 'https://telegra.ph/POLITIKA-KONFIDENCIALNOSTI-08-12-99'
+OFFER_URL   = 'https://telegra.ph/PUBLICHNAYA-OFERTA-08-12-15'
+BOT_USERNAME = 'ImagesGPT_bot'
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
+log = logging.getLogger('ImagesGPT')
+
+# ─────────── translations ───────────
+LANGS = ('ru', 'en')
+LANGS_NAMES = {'ru': '🇷🇺 Русский', 'en': '🇬🇧 English'}
+
+TR = {
+    'ru': {
+        'menu_title': '🤖 <b>ImagesGPT</b>',
+        'menu_sub': 'AI-генератор изображений',
+        'balance': '💰 Баланс',
+        'topup': '💳 Пополнить',
+        'history': '📜 История',
+        'promo': '🎁 Промокод',
+        'ref': '👥 Пригласить друга',
+        'support': '🆘 Поддержка',
+        'help': 'ℹ️ Помощь',
+        'lang': '🌐 Язык',
+        'create_btn': '🎨 Создать изображение',
+        'back_menu': '◀️ В меню',
+        'back': '◀️ Назад',
+        'cancel': '❌ Отмена',
+        'rubles': 'Рубли', 'coins': 'Монеты', 'rate': 'Курс',
+        'gen_cost': 'Генерация',
+        'choose_action': 'Выбери действие ниже 👇',
+        'your_balance': '💰 <b>Баланс</b>\n━━━━━━━━━━━━━━━━━━━━',
+        'topup_title': '💳 <b>Пополнение баланса</b>',
+        'topup_note': '🕐 Платёжные методы появятся позже.\nПока что напиши в поддержку — пополним вручную.',
+        'support_btn': '🆘 Написать в поддержку',
+        'exchange_btn': '🔄 Обменять на монеты',
+        'exchange_title': '🔄 <b>Обмен рублей на монеты</b>',
+        'exchange_ask': 'Напиши, сколько рублей хочешь обменять:',
+        'exchange_must_be_multiple': 'Сумма должна быть кратна {rate} ₽',
+        'exchange_done': '✅ <b>Обмен выполнен</b>',
+        'exchange_spent': 'Списано', 'exchange_got': 'Получено',
+        'history_empty': '📜 <b>История пуста.</b>',
+        'history_title': '📜 <b>Последние генерации</b>',
+        'ref_title': '👥 <b>Пригласить друга</b>',
+        'ref_your_link': '🔗 Твоя ссылка:',
+        'ref_you_get': '💸 Ты получаешь <b>{percent}%</b> от каждого пополнения друзей.',
+        'ref_earn_rub': '💵 Заработанное начисляется в рублях.',
+        'ref_invited': '👤 Приглашено', 'ref_earned': '💵 Заработано',
+        'ref_share': '📤 Поделиться',
+        'ref_note': '<i>Бонус начисляется автоматически, когда друг пополнит баланс.</i>',
+        'promo_ask': '🎁 <b>Введи промокод:</b>',
+        'promo_ok': '🎉 Промокод активирован!',
+        'promo_credited': 'Начислено: <b>+{n}</b> монет',
+        'support_title': '🆘 <b>Поддержка</b>',
+        'support_open_exists': 'У тебя есть открытый тикет <b>#{tid}</b>.\nМожешь продолжить или создать новый.',
+        'support_desc': 'Опиши проблему или вопрос — ответим как можно скорее.\nМожно прикрепить фото.',
+        'support_new': '✍️ Создать новый тикет',
+        'support_my': '📋 Мои тикеты',
+        'support_continue': '💬 Продолжить тикет #{tid}',
+        'support_create_ask': '✍️ <b>Опиши проблему</b> (текст или фото):',
+        'support_created': '✅ <b>Тикет #{tid} создан.</b>\n\nМы ответим в ближайшее время.',
+        'support_none': '📋 У тебя пока нет тикетов.',
+        'support_my_title': '📋 <b>Твои тикеты</b>',
+        'help_title': 'ℹ️ <b>Помощь</b>',
+        'help_text': (
+            '🎨 <b>Создать изображение</b> — напиши описание, выбери размер, получи картинку.\n\n'
+            '💰 <b>Баланс</b> — рубли и монеты. Обмен рублей на монеты.\n\n'
+            '💳 <b>Пополнить</b> — пополнить рублёвый баланс.\n\n'
+            '📜 <b>История</b> — последние 10 генераций.\n\n'
+            '👥 <b>Пригласить друга</b> — получай {percent}% от пополнений друзей в рублях.\n\n'
+            '🎁 <b>Промокод</b> — активируй бонусный код.\n\n'
+            '🆘 <b>Поддержка</b> — создай тикет, ответим в чате.'
+        ),
+        'insufficient_coins': '❌ Недостаточно монет.',
+        'need_coins': 'Нужно: <b>{need} 🪙</b>\nУ тебя: <b>{have} 🪙</b>',
+        'create_prompt': '🎨 <b>Напиши описание изображения:</b>\n\nМаксимум 4000 символов.',
+        'checking': '🔎 Проверяю запрос…',
+        'blocked': '❌ <b>Запрос отклонён.</b>',
+        'choose_size': '📐 <b>Выбери размер:</b>',
+        'size_1024': '🟦 1024×1024',
+        'confirm_title': '🎨 <b>Проверь запрос</b>',
+        'confirm_create': '✅ Создать',
+        'queue_title': '⏳ <b>В очереди</b>',
+        'queue_pos': 'Позиция',
+        'queue_cancel': '❌ Отменить и вернуть монету',
+        'in_progress': '🎨 <b>Генерирую…</b>\nОбычно это занимает 30–90 секунд.\nЛимит: {limit}.',
+        'done_title': '✅ <b>Готово!</b>',
+        'time_label': '⏱ Время',
+        'left_coins': '💰 Осталось',
+        'timeout': '⏱ Генерация превысила лимит ({limit}). Монета возвращена.',
+        'error_gen': '❌ Ошибка генерации. Монета возвращена.',
+        'terms_title': '📄 <b>Перед началом работы</b>',
+        'terms_lead': 'Ознакомься с документами:',
+        'terms_privacy': '🔒 Политика конфиденциальности',
+        'terms_offer': '📜 Пользовательское соглашение',
+        'terms_note': 'Для использования бота необходимо принять условия.',
+        'terms_accept': '✅ Согласен с условиями',
+        'terms_reject': '❌ Отклонить',
+        'terms_accepted': '✅ Условия приняты.',
+        'terms_rejected': '❌ Вы отклонили условия.\n\nДоступ к боту закрыт. Если передумаете — /start.',
+        'terms_first': '❌ Сначала примите условия. Отправьте /start.',
+        'banned_access': '⛔ Доступ ограничен.',
+        'banned_title': '⛔ <b>Доступ к боту ограничен.</b>',
+        'banned_reason': 'Причина',
+        'menu_hint': 'Выбери действие в меню 👇',
+        'lang_title': '🌐 <b>Выбор языка</b>',
+        'lang_current': 'Текущий язык',
+        'lang_switched': '✅ Язык: {lang}',
+        'rate_limit': '⏱ Слишком часто. Подожди ещё {sec} сек.',
+        'not_enough_rub': '❌ Недостаточно рублей.',
+        'min_exchange': 'Минимум для обмена',
+        'you_have': 'У тебя',
+        'ticket_msg_added': '📩 Сообщение добавлено в тикет #{tid}.',
+        'ticket_closed': '🔒 Тикет #{tid} закрыт.',
+        'support_reply': '💬 <b>Ответ поддержки (тикет #{tid}):</b>',
+        'reply_here': 'Ответь сюда, чтобы продолжить.',
+    },
+    'en': {
+        'menu_title': '🤖 <b>ImagesGPT</b>',
+        'menu_sub': 'AI image generator',
+        'balance': '💰 Balance',
+        'topup': '💳 Top up',
+        'history': '📜 History',
+        'promo': '🎁 Promo code',
+        'ref': '👥 Invite a friend',
+        'support': '🆘 Support',
+        'help': 'ℹ️ Help',
+        'lang': '🌐 Language',
+        'create_btn': '🎨 Create image',
+        'back_menu': '◀️ Menu',
+        'back': '◀️ Back',
+        'cancel': '❌ Cancel',
+        'rubles': 'Rubles', 'coins': 'Coins', 'rate': 'Rate',
+        'gen_cost': 'Generation',
+        'choose_action': 'Choose an action 👇',
+        'your_balance': '💰 <b>Balance</b>\n━━━━━━━━━━━━━━━━━━━━',
+        'topup_title': '💳 <b>Top up balance</b>',
+        'topup_note': '🕐 Payment methods coming soon.\nFor now, message support — we\'ll top up manually.',
+        'support_btn': '🆘 Contact support',
+        'exchange_btn': '🔄 Exchange to coins',
+        'exchange_title': '🔄 <b>Exchange rubles to coins</b>',
+        'exchange_ask': 'How many rubles do you want to exchange?',
+        'exchange_must_be_multiple': 'Amount must be a multiple of {rate} ₽',
+        'exchange_done': '✅ <b>Exchange complete</b>',
+        'exchange_spent': 'Spent', 'exchange_got': 'Received',
+        'history_empty': '📜 <b>History is empty.</b>',
+        'history_title': '📜 <b>Recent generations</b>',
+        'ref_title': '👥 <b>Invite a friend</b>',
+        'ref_your_link': '🔗 Your link:',
+        'ref_you_get': '💸 You get <b>{percent}%</b> of every friend\'s top-up.',
+        'ref_earn_rub': '💵 Earnings are credited in rubles.',
+        'ref_invited': '👤 Invited', 'ref_earned': '💵 Earned',
+        'ref_share': '📤 Share',
+        'ref_note': '<i>Bonus is credited automatically when a friend tops up.</i>',
+        'promo_ask': '🎁 <b>Enter promo code:</b>',
+        'promo_ok': '🎉 Promo activated!',
+        'promo_credited': 'Credited: <b>+{n}</b> coins',
+        'support_title': '🆘 <b>Support</b>',
+        'support_open_exists': 'You have an open ticket <b>#{tid}</b>.\nYou can continue or create a new one.',
+        'support_desc': 'Describe your issue — we\'ll reply soon.\nYou can attach a photo.',
+        'support_new': '✍️ Create new ticket',
+        'support_my': '📋 My tickets',
+        'support_continue': '💬 Continue ticket #{tid}',
+        'support_create_ask': '✍️ <b>Describe the issue</b> (text or photo):',
+        'support_created': '✅ <b>Ticket #{tid} created.</b>\n\nWe\'ll reply shortly.',
+        'support_none': '📋 You have no tickets yet.',
+        'support_my_title': '📋 <b>Your tickets</b>',
+        'help_title': 'ℹ️ <b>Help</b>',
+        'help_text': (
+            '🎨 <b>Create image</b> — write a description, pick a size, get a picture.\n\n'
+            '💰 <b>Balance</b> — rubles and coins. Exchange rubles to coins.\n\n'
+            '💳 <b>Top up</b> — top up your ruble balance.\n\n'
+            '📜 <b>History</b> — last 10 generations.\n\n'
+            '👥 <b>Invite a friend</b> — get {percent}% of friends\' top-ups in rubles.\n\n'
+            '🎁 <b>Promo code</b> — activate a bonus code.\n\n'
+            '🆘 <b>Support</b> — create a ticket, we\'ll reply in chat.'
+        ),
+        'insufficient_coins': '❌ Not enough coins.',
+        'need_coins': 'Needed: <b>{need} 🪙</b>\nYou have: <b>{have} 🪙</b>',
+        'create_prompt': '🎨 <b>Write a description of the image:</b>\n\nMax 4000 characters.',
+        'checking': '🔎 Checking prompt…',
+        'blocked': '❌ <b>Request blocked.</b>',
+        'choose_size': '📐 <b>Choose size:</b>',
+        'size_1024': '🟦 1024×1024',
+        'confirm_title': '🎨 <b>Confirm request</b>',
+        'confirm_create': '✅ Create',
+        'queue_title': '⏳ <b>In queue</b>',
+        'queue_pos': 'Position',
+        'queue_cancel': '❌ Cancel and refund coin',
+        'in_progress': '🎨 <b>Generating…</b>\nUsually takes 30–90 seconds.\nLimit: {limit}.',
+        'done_title': '✅ <b>Done!</b>',
+        'time_label': '⏱ Time',
+        'left_coins': '💰 Left',
+        'timeout': '⏱ Generation exceeded limit ({limit}). Coin refunded.',
+        'error_gen': '❌ Generation error. Coin refunded.',
+        'terms_title': '📄 <b>Before you start</b>',
+        'terms_lead': 'Please review the documents:',
+        'terms_privacy': '🔒 Privacy Policy',
+        'terms_offer': '📜 Terms of Service',
+        'terms_note': 'You must accept the terms to use the bot.',
+        'terms_accept': '✅ I agree to the terms',
+        'terms_reject': '❌ Decline',
+        'terms_accepted': '✅ Terms accepted.',
+        'terms_rejected': '❌ You declined the terms.\n\nAccess is closed. If you change your mind — /start.',
+        'terms_first': '❌ Please accept the terms first. Send /start.',
+        'banned_access': '⛔ Access denied.',
+        'banned_title': '⛔ <b>Access to the bot is restricted.</b>',
+        'banned_reason': 'Reason',
+        'menu_hint': 'Choose an action in the menu 👇',
+        'lang_title': '🌐 <b>Language selection</b>',
+        'lang_current': 'Current language',
+        'lang_switched': '✅ Language: {lang}',
+        'rate_limit': '⏱ Too often. Wait {sec} more sec.',
+        'not_enough_rub': '❌ Not enough rubles.',
+        'min_exchange': 'Minimum for exchange',
+        'you_have': 'You have',
+        'ticket_msg_added': '📩 Message added to ticket #{tid}.',
+        'ticket_closed': '🔒 Ticket #{tid} closed.',
+        'support_reply': '💬 <b>Support reply (ticket #{tid}):</b>',
+        'reply_here': 'Reply here to continue.',
+    },
+}
+
+def get_lang(uid):
+    r = db().execute('SELECT lang FROM users WHERE user_id=?',(uid,)).fetchone()
+    if r and r['lang'] in LANGS:
+        return r['lang']
+    return 'ru'
+
+def set_lang(uid, lang):
+    if lang not in LANGS: return
+    c = db(); c.execute('UPDATE users SET lang=? WHERE user_id=?',(lang,uid)); c.commit()
+
+def t(uid, key, **kw):
+    lang = get_lang(uid)
+    s = TR.get(lang, TR['ru']).get(key) or TR['ru'].get(key) or key
+    return s.format(**kw) if kw else s
+
+# ─────────── db ───────────
+_db = None
+def db():
+    global _db
+    if _db is None:
+        _db = sqlite3.connect(DB, check_same_thread=False)
+        _db.row_factory = sqlite3.Row
+    return _db
+
+def init_db():
+    c = db()
+    c.executescript('''
+        CREATE TABLE IF NOT EXISTS users(
+            user_id INTEGER PRIMARY KEY, username TEXT, full_name TEXT,
+            balance INTEGER NOT NULL DEFAULT 0,
+            rub_balance INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT, last_seen TEXT,
+            terms_accepted INTEGER NOT NULL DEFAULT 0, banned INTEGER NOT NULL DEFAULT 0,
+            ban_reason TEXT, banned_at TEXT, banned_by INTEGER,
+            referred_by INTEGER, ref_reward_given INTEGER NOT NULL DEFAULT 0,
+            lang TEXT DEFAULT 'ru'
+        );
+        CREATE TABLE IF NOT EXISTS history(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER,
+            prompt TEXT, size TEXT, status TEXT, created_at TEXT, file_id TEXT, elapsed REAL
+        );
+        CREATE TABLE IF NOT EXISTS tickets(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'open', created_at TEXT, updated_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS ticket_messages(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, ticket_id INTEGER NOT NULL,
+            sender TEXT NOT NULL, text TEXT, photo_file_id TEXT, created_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
+        CREATE TABLE IF NOT EXISTS referrals(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, inviter_id INTEGER, invited_id INTEGER,
+            reward_paid INTEGER NOT NULL DEFAULT 0, created_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS promo_codes(
+            code TEXT PRIMARY KEY, amount INTEGER NOT NULL, uses_left INTEGER NOT NULL,
+            total_uses INTEGER NOT NULL, expires_at TEXT, created_by INTEGER, created_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS promo_uses(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT, user_id INTEGER, created_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS topups(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
+            amount INTEGER NOT NULL, method TEXT, created_at TEXT, by_admin INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS ref_earnings(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            referrer_id INTEGER NOT NULL, referred_id INTEGER NOT NULL,
+            amount INTEGER NOT NULL, source_topup_id INTEGER, created_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS admins(
+            user_id INTEGER PRIMARY KEY, added_by INTEGER, added_at TEXT
+        );
+    ''')
+    migrations = [
+        'ALTER TABLE users ADD COLUMN banned INTEGER NOT NULL DEFAULT 0',
+        'ALTER TABLE users ADD COLUMN ban_reason TEXT',
+        'ALTER TABLE users ADD COLUMN banned_at TEXT',
+        'ALTER TABLE users ADD COLUMN banned_by INTEGER',
+        'ALTER TABLE users ADD COLUMN referred_by INTEGER',
+        'ALTER TABLE users ADD COLUMN ref_reward_given INTEGER NOT NULL DEFAULT 0',
+        'ALTER TABLE users ADD COLUMN rub_balance INTEGER NOT NULL DEFAULT 0',
+        'ALTER TABLE users ADD COLUMN lang TEXT DEFAULT "ru"',
+        'ALTER TABLE history ADD COLUMN file_id TEXT',
+        'ALTER TABLE history ADD COLUMN elapsed REAL',
+        'ALTER TABLE ticket_messages ADD COLUMN photo_file_id TEXT',
+    ]
+    for stmt in migrations:
+        try: c.execute(stmt)
+        except sqlite3.OperationalError: pass
+    defaults = {
+        'log_level':'2', 'max_concurrent':'1', 'image_cost':'1', 'start_balance':'1',
+        'coin_rate':'2',
+        'ref_percent':'10',
+        'timeout':str(TIMEOUT_DEFAULT),
+        'rate_limit_count':'5',
+        'rate_limit_window':'60',
+    }
+    for k,v in defaults.items():
+        c.execute('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)',(k,v))
+    c.commit()
+
+def setting(key, default=None):
+    r = db().execute('SELECT value FROM settings WHERE key=?',(key,)).fetchone()
+    return r['value'] if r else default
+
+def set_setting(key, value):
+    c = db(); c.execute('INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)',(key,str(value))); c.commit()
+
+def get_timeout():
+    try: return int(setting('timeout', str(TIMEOUT_DEFAULT)))
+    except Exception: return TIMEOUT_DEFAULT
+
+def coin_rate():
+    try: return max(1, int(setting('coin_rate','2')))
+    except Exception: return 2
+
+def ref_percent():
+    try: return max(0, int(setting('ref_percent','10')))
+    except Exception: return 10
+
+def rate_limit_count():
+    try: return max(1, int(setting('rate_limit_count','5')))
+    except Exception: return 5
+
+def rate_limit_window():
+    try: return max(5, int(setting('rate_limit_window','60')))
+    except Exception: return 60
+
+# ─────────── rate limit ───────────
+_rate_log = {}
+def check_rate(uid):
+    """Возвращает (ok, wait_sec)."""
+    limit = rate_limit_count()
+    window = rate_limit_window()
+    now = time.time()
+    times = [x for x in _rate_log.get(uid, []) if now - x < window]
+    if len(times) >= limit:
+        wait = int(window - (now - times[0])) + 1
+        _rate_log[uid] = times
+        return False, wait
+    times.append(now)
+    _rate_log[uid] = times
+    return True, 0
+
+# ─────────── admins ───────────
+def is_admin(uid):
+    if uid == ADMIN_ID: return True
+    return bool(db().execute('SELECT 1 FROM admins WHERE user_id=?',(uid,)).fetchone())
+
+def add_admin(uid, by):
+    c = db()
+    c.execute('INSERT OR IGNORE INTO admins(user_id, added_by, added_at) VALUES(?,?,?)',
+              (uid, by, datetime.now().isoformat(timespec='seconds')))
+    c.commit()
+
+def remove_admin(uid):
+    if uid == ADMIN_ID: return False
+    c = db(); c.execute('DELETE FROM admins WHERE user_id=?',(uid,)); c.commit(); return True
+
+def list_admins():
+    return db().execute('SELECT user_id, added_by, added_at FROM admins ORDER BY added_at').fetchall()
+
+# ─────────── users ───────────
+def ensure_user(u):
+    c = db(); now = datetime.now().isoformat(timespec='seconds')
+    r = c.execute('SELECT user_id FROM users WHERE user_id=?',(u.id,)).fetchone()
+    if r is None:
+        sb = int(setting('start_balance','1'))
+        c.execute('INSERT INTO users(user_id,username,full_name,balance,created_at,last_seen,lang) VALUES(?,?,?,?,?,?,?)',
+                  (u.id,u.username or '',u.full_name or '',sb,now,now,'ru'))
+    else:
+        c.execute('UPDATE users SET username=?,full_name=?,last_seen=? WHERE user_id=?',
+                  (u.username or '',u.full_name or '',now,u.id))
+    c.commit()
+
+def ensure_user_by_id(uid):
+    c = db(); now = datetime.now().isoformat(timespec='seconds')
+    r = c.execute('SELECT user_id FROM users WHERE user_id=?',(uid,)).fetchone()
+    if r is None:
+        sb = int(setting('start_balance','1'))
+        c.execute('INSERT INTO users(user_id,username,full_name,balance,created_at,last_seen,lang) VALUES(?,?,?,?,?,?,?)',
+                  (uid,'','',sb,now,now,'ru'))
+    c.commit()
+
+def get_user(uid):
+    return db().execute('SELECT * FROM users WHERE user_id=?',(uid,)).fetchone()
+
+def balance(uid):
+    r = db().execute('SELECT balance FROM users WHERE user_id=?',(uid,)).fetchone()
+    return r['balance'] if r else 0
+
+def rub_balance(uid):
+    r = db().execute('SELECT rub_balance FROM users WHERE user_id=?',(uid,)).fetchone()
+    return r['rub_balance'] if r else 0
+
+def change_balance(uid,n):
+    c = db(); c.execute('UPDATE users SET balance=balance+? WHERE user_id=?',(n,uid)); c.commit()
+
+def set_balance_exact(uid,n):
+    c = db(); c.execute('UPDATE users SET balance=? WHERE user_id=?',(n,uid)); c.commit()
+
+def set_rub_exact(uid,n):
+    c = db(); c.execute('UPDATE users SET rub_balance=? WHERE user_id=?',(n,uid)); c.commit()
+
+def has_accepted(uid):
+    r = db().execute('SELECT terms_accepted FROM users WHERE user_id=?',(uid,)).fetchone()
+    return bool(r and r['terms_accepted'])
+
+def accept_terms(uid):
+    c = db(); c.execute('UPDATE users SET terms_accepted=1 WHERE user_id=?',(uid,)); c.commit()
+
+def is_banned(uid):
+    r = db().execute('SELECT banned FROM users WHERE user_id=?',(uid,)).fetchone()
+    return bool(r and r['banned'])
+
+def set_ban(uid, val, reason=None, by=None):
+    c = db()
+    if val:
+        now = datetime.now().isoformat(timespec='seconds')
+        c.execute('UPDATE users SET banned=1, ban_reason=?, banned_at=?, banned_by=? WHERE user_id=?',
+                  (reason or '', now, by, uid))
+    else:
+        c.execute('UPDATE users SET banned=0, ban_reason=NULL, banned_at=NULL, banned_by=NULL WHERE user_id=?',(uid,))
+    c.commit()
+
+def list_banned(limit=50):
+    return db().execute('SELECT user_id,username,full_name,ban_reason,banned_at FROM users WHERE banned=1 ORDER BY banned_at DESC LIMIT ?',(limit,)).fetchall()
+
+def add_history(uid, prompt, size, status, file_id=None, elapsed=None):
+    c = db()
+    c.execute('INSERT INTO history(user_id,prompt,size,status,created_at,file_id,elapsed) VALUES(?,?,?,?,?,?,?)',
+              (uid,prompt,size,status,datetime.now().isoformat(timespec='seconds'),file_id,elapsed))
+    c.commit()
+
+def user_history(uid, limit=10):
+    return db().execute('SELECT prompt,size,status,created_at,file_id,elapsed FROM history WHERE user_id=? ORDER BY id DESC LIMIT ?',
+                        (uid,limit)).fetchall()
+
+def gen_time_stats():
+    r = db().execute('SELECT AVG(elapsed) AS a, MIN(elapsed) AS mn, MAX(elapsed) AS mx, COUNT(elapsed) AS c FROM history WHERE status="success" AND elapsed IS NOT NULL').fetchone()
+    return (r['a'] or 0, r['mn'] or 0, r['mx'] or 0, r['c'] or 0)
+
+# ─────────── rub / exchange ───────────
+def topup_rub(uid, amount, method='manual', by_admin=None):
+    if amount == 0: return None
+    c = db()
+    now = datetime.now().isoformat(timespec='seconds')
+    c.execute('UPDATE users SET rub_balance=rub_balance+? WHERE user_id=?',(amount,uid))
+    if amount > 0:
+        cur = c.execute('INSERT INTO topups(user_id,amount,method,created_at,by_admin) VALUES(?,?,?,?,?)',
+                        (uid,amount,method,now,by_admin))
+        topup_id = cur.lastrowid
+        u = c.execute('SELECT referred_by FROM users WHERE user_id=?',(uid,)).fetchone()
+        if u and u['referred_by']:
+            percent = ref_percent()
+            bonus = int(amount * percent / 100)
+            if bonus > 0:
+                c.execute('UPDATE users SET rub_balance=rub_balance+? WHERE user_id=?',(bonus,u['referred_by']))
+                c.execute('INSERT INTO ref_earnings(referrer_id,referred_id,amount,source_topup_id,created_at) VALUES(?,?,?,?,?)',
+                          (u['referred_by'],uid,bonus,topup_id,now))
+                c.commit()
+                return u['referred_by'], bonus
+    c.commit()
+    return None
+
+def exchange_rub_to_coins(uid, rub):
+    rate = coin_rate()
+    if rub <= 0: return False, 'bad_amount'
+    if rub % rate != 0: return False, 'not_multiple'
+    coins = rub // rate
+    if rub_balance(uid) < rub: return False, 'not_enough_rub'
+    c = db()
+    c.execute('UPDATE users SET rub_balance=rub_balance-?, balance=balance+? WHERE user_id=?',(rub,coins,uid))
+    c.commit()
+    return True, coins
+
+# ─────────── referrals ───────────
+def set_referrer(new_uid, ref_id):
+    if new_uid == ref_id: return
+    u = get_user(new_uid)
+    if not u or u['referred_by'] is not None: return
+    inv = get_user(ref_id)
+    if not inv: return
+    c = db()
+    c.execute('UPDATE users SET referred_by=? WHERE user_id=?',(ref_id,new_uid))
+    c.execute('INSERT INTO referrals(inviter_id,invited_id,reward_paid,created_at) VALUES(?,?,0,?)',
+              (ref_id,new_uid,datetime.now().isoformat(timespec='seconds')))
+    c.commit()
+
+def ref_stats(uid):
+    c = db()
+    total = c.execute('SELECT COUNT(*) AS n FROM referrals WHERE inviter_id=?',(uid,)).fetchone()['n']
+    earned = c.execute('SELECT COALESCE(SUM(amount),0) AS s FROM ref_earnings WHERE referrer_id=?',(uid,)).fetchone()['s']
+    return total, earned
+
+def ref_link(uid):
+    return f'https://t.me/{BOT_USERNAME}?start=ref_{uid}'
+
+# ─────────── promo ───────────
+def create_promo(code, amount, uses, days=None, by=None):
+    now = datetime.now()
+    expires = (now + timedelta(days=days)).isoformat(timespec='seconds') if days else None
+    c = db()
+    try:
+        c.execute('INSERT INTO promo_codes(code,amount,uses_left,total_uses,expires_at,created_by,created_at) VALUES(?,?,?,?,?,?,?)',
+                  (code, amount, uses, uses, expires, by, now.isoformat(timespec='seconds')))
+        c.commit()
+        return True, None
+    except sqlite3.IntegrityError:
+        return False, 'exists'
+
+def activate_promo(code, uid):
+    c = db()
+    p = c.execute('SELECT * FROM promo_codes WHERE code=?',(code,)).fetchone()
+    if not p: return False, 'not_found'
+    if p['uses_left'] <= 0: return False, 'exhausted'
+    if p['expires_at']:
+        try:
+            if datetime.fromisoformat(p['expires_at']) < datetime.now():
+                return False, 'expired'
+        except Exception: pass
+    used = c.execute('SELECT 1 FROM promo_uses WHERE code=? AND user_id=?',(code,uid)).fetchone()
+    if used: return False, 'already_used'
+    change_balance(uid, p['amount'])
+    c.execute('UPDATE promo_codes SET uses_left=uses_left-1 WHERE code=?',(code,))
+    c.execute('INSERT INTO promo_uses(code,user_id,created_at) VALUES(?,?,?)',
+              (code,uid,datetime.now().isoformat(timespec='seconds')))
+    c.commit()
+    return True, p['amount']
+
+def list_promos(limit=50):
+    return db().execute('SELECT code,amount,uses_left,total_uses,expires_at FROM promo_codes ORDER BY created_at DESC LIMIT ?',(limit,)).fetchall()
+
+def delete_promo(code):
+    c = db(); c.execute('DELETE FROM promo_codes WHERE code=?',(code,)); c.commit()
+
+def get_promo(code):
+    return db().execute('SELECT * FROM promo_codes WHERE code=?',(code,)).fetchone()
+
+# ─────────── tickets ───────────
+def create_ticket(uid, text=None, photo_id=None):
+    now = datetime.now().isoformat(timespec='seconds')
+    c = db()
+    tid = c.execute('INSERT INTO tickets(user_id,status,created_at,updated_at) VALUES(?,?,?,?)',
+                    (uid,'open',now,now)).lastrowid
+    c.execute('INSERT INTO ticket_messages(ticket_id,sender,text,photo_file_id,created_at) VALUES(?,?,?,?,?)',
+              (tid,'user',text,photo_id,now))
+    c.commit()
+    return tid
+
+def add_ticket_msg(tid, sender, text=None, photo_id=None):
+    now = datetime.now().isoformat(timespec='seconds')
+    c = db()
+    c.execute('INSERT INTO ticket_messages(ticket_id,sender,text,photo_file_id,created_at) VALUES(?,?,?,?,?)',
+              (tid,sender,text,photo_id,now))
+    c.execute('UPDATE tickets SET updated_at=? WHERE id=?',(now,tid))
+    c.commit()
+
+def close_ticket(tid):
+    now = datetime.now().isoformat(timespec='seconds')
+    c = db(); c.execute('UPDATE tickets SET status=?,updated_at=? WHERE id=?',('closed',now,tid)); c.commit()
+
+def get_ticket(tid):
+    return db().execute('SELECT * FROM tickets WHERE id=?',(tid,)).fetchone()
+
+def get_open_ticket(uid):
+    r = db().execute('SELECT id FROM tickets WHERE user_id=? AND status="open" ORDER BY id DESC LIMIT 1',(uid,)).fetchone()
+    return r['id'] if r else None
+
+def ticket_msgs(tid, limit=50):
+    return db().execute('SELECT sender,text,photo_file_id,created_at FROM ticket_messages WHERE ticket_id=? ORDER BY id ASC LIMIT ?',
+                        (tid,limit)).fetchall()
+
+def list_user_tickets(uid, limit=10):
+    return db().execute('SELECT id,status,updated_at FROM tickets WHERE user_id=? ORDER BY id DESC LIMIT ?',(uid,limit)).fetchall()
+
+def list_open_tickets(limit=30):
+    return db().execute('SELECT id,user_id,updated_at FROM tickets WHERE status="open" ORDER BY updated_at DESC LIMIT ?',(limit,)).fetchall()
+
+# ─────────── keyboards ───────────
+def kb_menu(uid):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(t(uid,'create_btn'), callback_data='create')],
+        [InlineKeyboardButton(t(uid,'balance'), callback_data='balance'),
+         InlineKeyboardButton(t(uid,'topup'), callback_data='topup')],
+        [InlineKeyboardButton(t(uid,'history'), callback_data='history'),
+         InlineKeyboardButton(t(uid,'promo'), callback_data='promo')],
+        [InlineKeyboardButton(t(uid,'ref'), callback_data='ref')],
+        [InlineKeyboardButton(t(uid,'support'), callback_data='support'),
+         InlineKeyboardButton(t(uid,'help'), callback_data='help')],
+        [InlineKeyboardButton(t(uid,'lang'), callback_data='lang')],
+    ])
+
+def kb_balance(uid):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(t(uid,'topup'), callback_data='topup'),
+         InlineKeyboardButton(t(uid,'exchange_btn'), callback_data='exchange')],
+        [InlineKeyboardButton(t(uid,'back_menu'), callback_data='menu')],
+    ])
+
+def kb_sizes(uid):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(t(uid,'size_1024'), callback_data='size:1024x1024')],
+        [InlineKeyboardButton('🟧 1536×1024', callback_data='size:1536x1024'),
+         InlineKeyboardButton('🟪 1024×1536', callback_data='size:1024x1536')],
+        [InlineKeyboardButton(t(uid,'back'), callback_data='menu'),
+         InlineKeyboardButton(t(uid,'cancel'), callback_data='cancel')],
+    ])
+
+def kb_confirm(uid, token):
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(t(uid,'confirm_create'), callback_data='ok:'+token),
+        InlineKeyboardButton(t(uid,'cancel'), callback_data='no:'+token),
+    ]])
+
+def kb_terms(uid):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(t(uid,'terms_accept'), callback_data='terms:accept')],
+        [InlineKeyboardButton(t(uid,'terms_reject'), callback_data='terms:reject')],
+    ])
+
+def kb_lang(uid):
+    cur = get_lang(uid)
+    rows = []
+    for code, name in LANGS_NAMES.items():
+        mark = '✅ ' if code == cur else ''
+        rows.append([InlineKeyboardButton(mark + name, callback_data=f'lang:set:{code}')])
+    rows.append([InlineKeyboardButton(t(uid,'back_menu'), callback_data='menu')])
+    return InlineKeyboardMarkup(rows)
+
+def kb_support(uid, open_tid=None):
+    rows = []
+    if open_tid:
+        rows.append([InlineKeyboardButton(t(uid,'support_continue',tid=open_tid), callback_data=f'support:view:{open_tid}')])
+    rows.append([InlineKeyboardButton(t(uid,'support_new'), callback_data='support:new')])
+    rows.append([InlineKeyboardButton(t(uid,'support_my'), callback_data='support:list')])
+    rows.append([InlineKeyboardButton(t(uid,'back_menu'), callback_data='menu')])
+    return InlineKeyboardMarkup(rows)
+
+def kb_ticket_user(uid, tid):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('🔒 ' + t(uid,'ticket_closed',tid=tid).split('#')[0].strip(), callback_data=f'support:close:{tid}')],
+        [InlineKeyboardButton(t(uid,'back'), callback_data='support')],
+    ])
+
+def kb_ticket_admin(tid):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('✍️ Ответить', callback_data=f'ticket_reply:{tid}'),
+         InlineKeyboardButton('🔒 Закрыть', callback_data=f'ticket_close:{tid}')],
+    ])
+
+def kb_queue_cancel(uid, job_id):
+    return InlineKeyboardMarkup([[InlineKeyboardButton(t(uid,'queue_cancel'), callback_data=f'q:cancel:{job_id}')]])
+
+def kb_admin():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('📊 Статистика', callback_data='adm:stats'),
+         InlineKeyboardButton('🆘 Тикеты', callback_data='adm:tickets')],
+        [InlineKeyboardButton('👥 Пользователь', callback_data='adm:user'),
+         InlineKeyboardButton('📢 Рассылка', callback_data='adm:broadcast')],
+        [InlineKeyboardButton('🚫 Бан-лист', callback_data='adm:banlist'),
+         InlineKeyboardButton('🎁 Промокоды', callback_data='adm:promos')],
+        [InlineKeyboardButton('⚙️ Настройки', callback_data='adm:settings')],
+        [InlineKeyboardButton('🔄 Обновить', callback_data='adm:main')],
+    ])
+
+def kb_admin_settings():
+    ll = setting('log_level','2')
+    ll_names = {'0':'выкл','1':'только ошибки','2':'ошибки + генерации','3':'всё'}
+    tmo = get_timeout()
+    tmo_str = f'{tmo//60} мин' if tmo % 60 == 0 else f'{tmo} сек'
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f'📝 Логи: {ll_names.get(ll,ll)}', callback_data='adm:log')],
+        [InlineKeyboardButton(f'💰 Цена: {setting("image_cost","1")} 🪙', callback_data='adm:set:image_cost')],
+        [InlineKeyboardButton(f'🎁 Старт: {setting("start_balance","1")} 🪙', callback_data='adm:set:start_balance')],
+        [InlineKeyboardButton(f'👷 Параллельно: {setting("max_concurrent","1")}', callback_data='adm:set:max_concurrent')],
+        [InlineKeyboardButton(f'⏱ Таймаут: {tmo_str}', callback_data='adm:set:timeout')],
+        [InlineKeyboardButton(f'📊 Курс: 1 🪙 = {coin_rate()} ₽', callback_data='adm:set:coin_rate')],
+        [InlineKeyboardButton(f'💸 Реф: {ref_percent()}%', callback_data='adm:set:ref_percent')],
+        [InlineKeyboardButton(f'⏳ Rate-limit: {rate_limit_count()}/{rate_limit_window()}с', callback_data='adm:ratelimit')],
+        [InlineKeyboardButton('◀️ Назад', callback_data='adm:main')],
+    ])
+
+def kb_admin_ratelimit():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f'🔢 Кол-во: {rate_limit_count()}', callback_data='adm:set:rate_limit_count')],
+        [InlineKeyboardButton(f'⏱ Окно: {rate_limit_window()} сек', callback_data='adm:set:rate_limit_window')],
+        [InlineKeyboardButton('◀️ Назад', callback_data='adm:settings')],
+    ])
+
+def kb_user_card(uid):
+    u = get_user(uid)
+    banned = bool(u['banned'])
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('💰 Установить монеты', callback_data=f'adm:setbal:{uid}')],
+        [InlineKeyboardButton('🪙 Добавить монеты', callback_data=f'adm:addbal:{uid}')],
+        [InlineKeyboardButton('💵 Начислить рубли', callback_data=f'adm:addrub:{uid}')],
+        [InlineKeyboardButton('🚫 Разбанить' if banned else '⛔ Забанить', callback_data=f'adm:ban:{uid}')],
+        [InlineKeyboardButton('📜 История', callback_data=f'adm:hist:{uid}')],
+        [InlineKeyboardButton('◀️ Назад', callback_data='adm:main')],
+    ])
+
+def kb_promos_main():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('➕ Создать промокод', callback_data='adm:promo:new')],
+        [InlineKeyboardButton('📋 Список кодов', callback_data='adm:promo:list')],
+        [InlineKeyboardButton('◀️ Назад', callback_data='adm:main')],
+    ])
+
+def kb_promo_list():
+    rows = list_promos()
+    kb = []
+    for p in rows:
+        exp = f' • до {p["expires_at"][:10]}' if p['expires_at'] else ''
+        label = f'❌ {p["code"]} • {p["amount"]}🪙 • {p["uses_left"]}/{p["total_uses"]}{exp}'
+        kb.append([InlineKeyboardButton(label, callback_data=f'adm:promo:del:{p["code"]}')])
+    kb.append([InlineKeyboardButton('◀️ Назад', callback_data='adm:promos')])
+    return InlineKeyboardMarkup(kb)
+
+# ─────────── texts ───────────
+def main_text(uid):
+    return (
+        f'{t(uid,"menu_title")}\n'
+        '━━━━━━━━━━━━━━━━━━━━\n\n'
+        f'💵 {t(uid,"rubles")}: <b>{rub_balance(uid)} ₽</b>\n'
+        f'🪙 {t(uid,"coins")}: <b>{balance(uid)}</b>\n\n'
+        f'📊 {t(uid,"rate")}: <b>1 🪙 = {coin_rate()} ₽</b>\n'
+        f'🎨 {t(uid,"gen_cost")}: <b>{setting("image_cost","1")}</b> 🪙\n\n'
+        f'{t(uid,"choose_action")}'
+    )
+
+TERMS_TEXT_TPL = (
+    '{title}\n\n'
+    '{lead}\n\n'
+    '🔒 <a href="{privacy}">{privacy_t}</a>\n'
+    '📜 <a href="{offer}">{offer_t}</a>\n\n'
+    '{note}'
+)
+
+ADMIN_HELP = (
+    '🛠 <b>Админ-команды</b>\n'
+    '━━━━━━━━━━━━━━━━━━━━\n\n'
+    '👥 <b>Пользователи:</b>\n'
+    '<code>/user ID</code>\n'
+    '<code>/setbalance ID N</code>\n'
+    '<code>/addbalance ID N</code>\n'
+    '<code>/setrub ID N</code>\n'
+    '<code>/addrub ID N</code>\n\n'
+    '🚫 <b>Модерация:</b>\n'
+    '<code>/ban ID [причина]</code>\n'
+    '<code>/unban ID</code>\n\n'
+    '⚙️ <b>Настройки:</b>\n'
+    '<code>/setcost N</code>\n'
+    '<code>/setrate N</code>\n'
+    '<code>/setref N</code>\n'
+    '<code>/settimeout N</code>\n\n'
+    '👑 <b>Админы:</b>\n'
+    '<code>/setadmin ID</code>\n'
+    '<code>/unadmin ID</code>\n'
+    '<code>/admins</code>\n\n'
+    '📢 <b>Прочее:</b>\n'
+    '<code>/broadcast ТЕКСТ</code>\n'
+    '<code>/ticket ID</code>\n'
+    '<code>/stats</code>\n'
+    '<code>/admin</code>'
+)
+
+# ─────────── logging to admin ───────────
+async def alog(app, text, level=2):
+    try: cur = int(setting('log_level','2'))
+    except Exception: cur = 2
+    if cur == 0 or level > cur: return
+    try:
+        await app.bot.send_message(ADMIN_ID, text, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        log.warning('admin log: %s', e)
+
+# ─────────── helpers ───────────
+def fmt_timeout():
+    t_ = get_timeout()
+    if t_ % 60 == 0: return f'{t_//60} мин'
+    return f'{t_} сек'
+
+def fmt_duration(sec: float) -> str:
+    s = int(round(sec))
+    if s < 60: return f'{s} сек'
+    m, s = divmod(s, 60)
+    if m < 60: return f'{m} мин {s} сек'
+    h, m = divmod(m, 60)
+    return f'{h} ч {m} мин'
+
+# ─────────── api ───────────
+def _headers():
+    return {'Authorization': 'Bearer ' + API_KEY, 'Content-Type': 'application/json'}
+
+async def moderate(prompt):
+    payload = {'model': MODERATION_MODEL, 'messages': [
+        {'role':'system','content':'Moderate image prompts. Reply exactly ALLOW if allowed. Otherwise reply BLOCK: short reason.'},
+        {'role':'user','content':prompt}], 'temperature':0}
+    async with httpx.AsyncClient(timeout=60) as c:
+        r = await c.post(API_BASE+'/chat/completions', json=payload, headers=_headers()); r.raise_for_status()
+        d = r.json()
+    try: out = d['choices'][0]['message']['content'].strip()
+    except Exception: return False, 'check_failed'
+    if out.upper().startswith('ALLOW'): return True, ''
+    return False, (out.split(':',1)[1].strip() if ':' in out else 'blocked')
+
+async def generate(prompt, size, timeout_sec):
+    payload = {'model': IMAGE_MODEL, 'prompt': prompt, 'size': size, 'n': 1}
+    async with httpx.AsyncClient(timeout=timeout_sec + 30) as c:
+        r = await c.post(API_BASE+'/images/generations', json=payload, headers=_headers()); r.raise_for_status()
+        return r.json()
+
+async def send_image(app, chat_id, data):
+    items = data.get('data') or []
+    if not items: raise RuntimeError('No image in API response')
+    item = items[0]
+    msg = None
+    if item.get('b64_json'):
+        raw = base64.b64decode(item['b64_json'])
+        msg = await app.bot.send_photo(chat_id, raw, filename='imagesgpt.png')
+    elif item.get('url'):
+        async with httpx.AsyncClient(timeout=60) as c:
+            r = await c.get(item['url']); r.raise_for_status(); raw = r.content
+        msg = await app.bot.send_photo(chat_id, raw, filename='imagesgpt.png')
+    else:
+        raise RuntimeError('No b64_json or url in response')
+    if msg and msg.photo:
+        return msg.photo[-1].file_id
+    return None
+
+# ─────────── queue ───────────
+pending_jobs: list = []
+job_lock = asyncio.Lock()
+workers: list = []
+
+async def queue_position_updater(app):
+    while True:
+        try:
+            await asyncio.sleep(5)
+            async with job_lock:
+                snapshot = [(i, j) for i, j in enumerate(pending_jobs) if not j.get('cancelled')]
+            for pos0, j in snapshot:
+                pos = pos0 + 1
+                if j.get('last_pos') == pos or not j.get('msg_id'): continue
+                j['last_pos'] = pos
+                uid = j['uid']
+                try:
+                    await app.bot.edit_message_text(
+                        chat_id=j['chat'], message_id=j['msg_id'],
+                        text=(f'{t(uid,"queue_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n'
+                              f'📐 {j["size"]}\n'
+                              f'📝 {html.escape(j["prompt"][:120])}\n\n'
+                              f'{t(uid,"queue_pos")}: <b>{pos}</b>'),
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=kb_queue_cancel(uid, j['job_id']),
+                    )
+                except Exception: pass
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            log.warning('queue updater: %s', e)
+
+async def worker(app):
+    while True:
+        job = None
+        async with job_lock:
+            for i, j in enumerate(pending_jobs):
+                if not j.get('cancelled'):
+                    job = pending_jobs.pop(i)
+                    break
+        if job is None:
+            await asyncio.sleep(0.5)
+            continue
+
+        uid = job['uid']; chat = job['chat']
+        timeout_sec = get_timeout()
+        t_start = time.time()
+        try:
+            await app.bot.send_chat_action(chat, ChatAction.UPLOAD_PHOTO)
+            try:
+                await app.bot.edit_message_text(chat_id=chat, message_id=job['msg_id'],
+                    text=t(uid,'in_progress', limit=fmt_timeout()),
+                    parse_mode=ParseMode.HTML)
+            except Exception: pass
+            await alog(app, f'🎨 <b>Генерация</b>\n👤 <code>{uid}</code>\n📐 <code>{html.escape(job["size"])}</code>\n📝 {html.escape(job["prompt"][:600])}', level=2)
+
+            typing_task = asyncio.create_task(_keep_typing(app, chat, timeout_sec))
+            try:
+                data = await asyncio.wait_for(generate(job['prompt'], job['size'], timeout_sec), timeout_sec)
+            finally:
+                typing_task.cancel()
+                try: await typing_task
+                except Exception: pass
+
+            elapsed = time.time() - t_start
+            elapsed_str = fmt_duration(elapsed)
+
+            file_id = await send_image(app, chat, data)
+            add_history(uid, job['prompt'], job['size'], 'success', file_id, elapsed=elapsed)
+            await app.bot.send_message(chat,
+                f'{t(uid,"done_title")}\n━━━━━━━━━━━━━━━━━━━━\n'
+                f'{t(uid,"time_label")}: <b>{elapsed_str}</b>\n'
+                f'{t(uid,"left_coins")}: <b>{balance(uid)}</b> 🪙',
+                parse_mode=ParseMode.HTML, reply_markup=kb_menu(uid))
+            await alog(app, f'✅ <b>Готово</b> • 👤 <code>{uid}</code> • ⏱ <code>{elapsed_str}</code> • 🪙 <code>{balance(uid)}</code>', level=2)
+        except asyncio.TimeoutError:
+            elapsed = time.time() - t_start
+            change_balance(uid, int(setting('image_cost','1')))
+            add_history(uid, job['prompt'], job['size'], 'timeout', elapsed=elapsed)
+            await app.bot.send_message(chat, t(uid,'timeout', limit=fmt_timeout()), reply_markup=kb_menu(uid))
+            await alog(app, f'⏱ <b>Timeout</b> • 👤 <code>{uid}</code> • прошло <code>{fmt_duration(elapsed)}</code>', level=1)
+        except Exception as e:
+            elapsed = time.time() - t_start
+            change_balance(uid, int(setting('image_cost','1')))
+            add_history(uid, job['prompt'], job['size'], 'error', elapsed=elapsed)
+            await app.bot.send_message(chat,
+                f'{t(uid,"error_gen")}\n\n<code>{html.escape(str(e)[:400])}</code>',
+                parse_mode=ParseMode.HTML, reply_markup=kb_menu(uid))
+            await alog(app, f'❌ <b>Ошибка</b> • 👤 <code>{uid}</code> • прошло <code>{fmt_duration(elapsed)}</code>\n<code>{html.escape(str(e)[:800])}</code>', level=1)
+
+async def _keep_typing(app, chat, max_sec):
+    elapsed = 0
+    try:
+        while elapsed < max_sec:
+            try: await app.bot.send_chat_action(chat, ChatAction.UPLOAD_PHOTO)
+            except Exception: pass
+            await asyncio.sleep(4)
+            elapsed += 4
+    except asyncio.CancelledError:
+        return
+
+# ─────────── user handlers ───────────
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    u = update.effective_user
+    ensure_user(u)
+
+    if context.args:
+        arg = context.args[0]
+        if arg.startswith('ref_'):
+            try:
+                ref_id = int(arg[4:])
+                set_referrer(u.id, ref_id)
+            except ValueError: pass
+
+    if is_banned(u.id):
+        r = get_user(u.id)
+        reason = r['ban_reason'] or '—'
+        await update.message.reply_text(f'{t(u.id,"banned_title")}\n\n{t(u.id,"banned_reason")}: {html.escape(reason)}',
+                                        parse_mode=ParseMode.HTML)
+        return
+    if not has_accepted(u.id):
+        terms = TERMS_TEXT_TPL.format(
+            title=t(u.id,'terms_title'),
+            lead=t(u.id,'terms_lead'),
+            privacy=PRIVACY_URL, privacy_t=t(u.id,'terms_privacy'),
+            offer=OFFER_URL, offer_t=t(u.id,'terms_offer'),
+            note=t(u.id,'terms_note'))
+        await update.message.reply_text(terms, parse_mode=ParseMode.HTML,
+                                        reply_markup=kb_terms(u.id), disable_web_page_preview=True)
+        return
+    await update.message.reply_text(main_text(u.id), parse_mode=ParseMode.HTML, reply_markup=kb_menu(u.id))
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    await update.message.reply_text(f'{t(uid,"help_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n' + t(uid,'help_text', percent=ref_percent()),
+                                    parse_mode=ParseMode.HTML, reply_markup=kb_menu(uid))
+
+async def on_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    u = q.from_user
+    ensure_user(u)
+    uid = u.id
+    d = q.data
+
+    if d == 'terms:accept':
+        accept_terms(uid)
+        await q.edit_message_text(t(uid,'terms_accepted')+'\n\n'+main_text(uid),
+                                  parse_mode=ParseMode.HTML, reply_markup=kb_menu(uid))
+        return
+    if d == 'terms:reject':
+        await q.edit_message_text(t(uid,'terms_rejected'), parse_mode=ParseMode.HTML)
+        return
+    if is_banned(uid):
+        await q.edit_message_text(t(uid,'banned_access')); return
+    if not has_accepted(uid):
+        await q.edit_message_text(t(uid,'terms_first')); return
+
+    if d == 'menu':
+        await q.edit_message_text(main_text(uid), parse_mode=ParseMode.HTML, reply_markup=kb_menu(uid)); return
+    if d == 'help':
+        await q.edit_message_text(f'{t(uid,"help_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n' + t(uid,'help_text', percent=ref_percent()),
+                                  parse_mode=ParseMode.HTML, reply_markup=kb_menu(uid)); return
+
+    # язык
+    if d == 'lang':
+        await q.edit_message_text(
+            f'{t(uid,"lang_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n'
+            f'{t(uid,"lang_current")}: <b>{LANGS_NAMES.get(get_lang(uid),"")}</b>',
+            parse_mode=ParseMode.HTML, reply_markup=kb_lang(uid))
+        return
+    if d.startswith('lang:set:'):
+        new_lang = d.split(':',2)[2]
+        set_lang(uid, new_lang)
+        await q.edit_message_text(
+            f'{t(uid,"lang_switched", lang=LANGS_NAMES.get(new_lang,new_lang))}\n\n' + main_text(uid),
+            parse_mode=ParseMode.HTML, reply_markup=kb_menu(uid))
+        return
+
+    if d == 'balance':
+        await q.edit_message_text(
+            f'{t(uid,"your_balance")}\n\n'
+            f'💵 {t(uid,"rubles")}: <b>{rub_balance(uid)} ₽</b>\n'
+            f'🪙 {t(uid,"coins")}: <b>{balance(uid)}</b>\n\n'
+            f'📊 {t(uid,"rate")}: <b>1 🪙 = {coin_rate()} ₽</b>',
+            parse_mode=ParseMode.HTML, reply_markup=kb_balance(uid))
+        return
+
+    if d == 'topup':
+        await q.edit_message_text(
+            f'{t(uid,"topup_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n'
+            f'📊 {t(uid,"rate")}: <b>1 🪙 = {coin_rate()} ₽</b>\n'
+            f'💵 {t(uid,"rubles")}: <b>{rub_balance(uid)} ₽</b>\n\n'
+            f'{t(uid,"topup_note")}',
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(t(uid,'support_btn'), callback_data='support:new')],
+                [InlineKeyboardButton(t(uid,'back'), callback_data='balance')],
+            ]))
+        return
+
+    if d == 'exchange':
+        rb = rub_balance(uid)
+        rate = coin_rate()
+        if rb < rate:
+            await q.edit_message_text(
+                f'{t(uid,"not_enough_rub")}\n\n{t(uid,"min_exchange")}: <b>{rate} ₽</b>\n{t(uid,"you_have")}: <b>{rb} ₽</b>',
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(uid,'back'), callback_data='balance')]]))
+            return
+        context.user_data['waiting'] = 'exchange_rub'
+        await q.edit_message_text(
+            f'{t(uid,"exchange_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n'
+            f'📊 {t(uid,"rate")}: <b>1 🪙 = {rate} ₽</b>\n'
+            f'💵 {t(uid,"you_have")}: <b>{rb} ₽</b>\n\n'
+            f'{t(uid,"exchange_ask")}\n<i>{t(uid,"exchange_must_be_multiple", rate=rate)}</i>',
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(uid,'cancel'), callback_data='cancel')]]))
+        return
+
+    if d == 'history':
+        rows = user_history(uid)
+        if not rows:
+            await q.edit_message_text(t(uid,'history_empty'), parse_mode=ParseMode.HTML, reply_markup=kb_menu(uid)); return
+        lines = [t(uid,'history_title'), '━━━━━━━━━━━━━━━━━━━━', '']
+        for i, r in enumerate(rows, 1):
+            icon = '✅' if r['status'] == 'success' else '❌'
+            t_extra = f' • ⏱ {fmt_duration(r["elapsed"])}' if r['elapsed'] else ''
+            lines.append(f'{i}. {icon} {html.escape(r["prompt"][:80])}')
+            lines.append(f'    <i>{r["size"]} • {r["created_at"]}{t_extra}</i>')
+        await q.edit_message_text('\n'.join(lines), parse_mode=ParseMode.HTML, reply_markup=kb_menu(uid))
+        sent = 0
+        for r in rows:
+            if r['file_id'] and sent < 3:
+                try:
+                    await context.bot.send_photo(q.message.chat_id, r['file_id'])
+                    sent += 1
+                except Exception: pass
+        return
+
+    if d == 'ref':
+        total, earned = ref_stats(uid)
+        percent = ref_percent()
+        text = (
+            f'{t(uid,"ref_title")}\n'
+            '━━━━━━━━━━━━━━━━━━━━\n\n'
+            f'{t(uid,"ref_your_link")}\n<code>{ref_link(uid)}</code>\n\n'
+            f'{t(uid,"ref_you_get", percent=percent)}\n'
+            f'{t(uid,"ref_earn_rub")}\n\n'
+            f'{t(uid,"ref_invited")}: <b>{total}</b>\n'
+            f'{t(uid,"ref_earned")}: <b>{earned} ₽</b>\n\n'
+            f'{t(uid,"ref_note")}'
+        )
+        await q.edit_message_text(text, parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(t(uid,'ref_share'), url=f'https://t.me/share/url?url={ref_link(uid)}&text=ImagesGPT')],
+                [InlineKeyboardButton(t(uid,'back_menu'), callback_data='menu')],
+            ]))
+        return
+
+    if d == 'promo':
+        context.user_data['waiting'] = 'promo'
+        await q.edit_message_text(t(uid,'promo_ask'), parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(uid,'back_menu'), callback_data='menu')]])); return
+
+    if d == 'support':
+        tid = get_open_ticket(uid)
+        txt = f'{t(uid,"support_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n'
+        txt += t(uid,'support_open_exists',tid=tid) if tid else t(uid,'support_desc')
+        await q.edit_message_text(txt, parse_mode=ParseMode.HTML, reply_markup=kb_support(uid, tid)); return
+    if d == 'support:new':
+        context.user_data['waiting'] = 'ticket'
+        await q.edit_message_text(t(uid,'support_create_ask'), parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(uid,'cancel'), callback_data='support')]])); return
+    if d == 'support:list':
+        rows = list_user_tickets(uid)
+        tid = get_open_ticket(uid)
+        if not rows:
+            await q.edit_message_text(t(uid,'support_none'), reply_markup=kb_support(uid, tid)); return
+        lines = [t(uid,'support_my_title'), '━━━━━━━━━━━━━━━━━━━━', '']
+        for r in rows:
+            icon = '🟢' if r['status'] == 'open' else '⚪'
+            lines.append(f'{icon} <b>#{r["id"]}</b> • {r["status"]} • {r["updated_at"]}')
+        await q.edit_message_text('\n'.join(lines), parse_mode=ParseMode.HTML, reply_markup=kb_support(uid, tid)); return
+    if d.startswith('support:view:'):
+        tid = int(d.split(':',2)[2])
+        t_ = get_ticket(tid)
+        if not t_ or t_['user_id'] != uid:
+            await q.edit_message_text('❌', reply_markup=kb_support(uid, get_open_ticket(uid))); return
+        await render_ticket_to_user(q, context, tid)
+        return
+    if d.startswith('support:close:'):
+        tid = int(d.split(':',2)[2])
+        t_ = get_ticket(tid)
+        if not t_ or t_['user_id'] != uid: return
+        close_ticket(tid)
+        await q.edit_message_text(t(uid,'ticket_closed', tid=tid), reply_markup=kb_support(uid, get_open_ticket(uid)))
+        await alog(context.application, f'⚪ Пользователь <code>{uid}</code> закрыл тикет #{tid}.', level=2)
+        return
+
+    if d.startswith('ticket_reply:'):
+        if not is_admin(uid): return
+        tid = int(d.split(':',1)[1])
+        t_ = get_ticket(tid)
+        if not t_: await q.edit_message_text('Тикет не найден.'); return
+        context.user_data['admin_reply_ticket'] = tid
+        await q.edit_message_text(f'✍️ Напиши ответ для тикета <b>#{tid}</b> (👤 <code>{t_["user_id"]}</code>)',
+                                  parse_mode=ParseMode.HTML); return
+    if d.startswith('ticket_close:'):
+        if not is_admin(uid): return
+        tid = int(d.split(':',1)[1])
+        t_ = get_ticket(tid)
+        if not t_: await q.edit_message_text('Тикет не найден.'); return
+        close_ticket(tid)
+        await q.edit_message_text(f'🔒 Тикет #{tid} закрыт.')
+        try:
+            await context.bot.send_message(t_['user_id'],
+                t(t_['user_id'],'ticket_closed',tid=tid),
+                parse_mode=ParseMode.HTML, reply_markup=kb_menu(t_['user_id']))
+        except Exception: pass
+        return
+
+    if d.startswith('adm:'):
+        if not is_admin(uid): return
+        await handle_admin_cb(q, context, d); return
+
+    if d.startswith('q:cancel:'):
+        job_id = d.split(':',2)[2]
+        refunded = False
+        async with job_lock:
+            for i, j in enumerate(pending_jobs):
+                if j['job_id'] == job_id and j['uid'] == uid:
+                    pending_jobs.pop(i); refunded = True; break
+        if refunded:
+            change_balance(uid, int(setting('image_cost','1')))
+            await q.edit_message_text(
+                f'❌ {t(uid,"queue_cancel")}\n\n💰 {balance(uid)} 🪙',
+                parse_mode=ParseMode.HTML, reply_markup=kb_menu(uid))
+        else:
+            await q.edit_message_text('❌', reply_markup=kb_menu(uid))
+        return
+
+    if d == 'create':
+        # rate limit
+        ok, wait = check_rate(uid)
+        if not ok:
+            await q.edit_message_text(t(uid,'rate_limit', sec=wait),
+                parse_mode=ParseMode.HTML, reply_markup=kb_menu(uid))
+            return
+        cost = int(setting('image_cost','1'))
+        if balance(uid) < cost:
+            await q.edit_message_text(
+                f'{t(uid,"insufficient_coins")}\n\n{t(uid,"need_coins", need=cost, have=balance(uid))}',
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(t(uid,'exchange_btn'), callback_data='exchange')],
+                    [InlineKeyboardButton(t(uid,'back_menu'), callback_data='menu')],
+                ]))
+            return
+        context.user_data['waiting'] = 'image'
+        await q.edit_message_text(t(uid,'create_prompt'), parse_mode=ParseMode.HTML,
+                                  reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(uid,'cancel'), callback_data='cancel')]]))
+        return
+    if d == 'cancel':
+        context.user_data.pop('waiting', None)
+        await q.edit_message_text('❌', reply_markup=kb_menu(uid)); return
+    if d.startswith('size:'):
+        p = context.user_data.get('prompt')
+        if not p:
+            await q.edit_message_text('❌', reply_markup=kb_menu(uid)); return
+        token = str(uuid.uuid4())
+        context.user_data['pending'] = {token: (p, d.split(':',1)[1])}
+        cost = int(setting('image_cost','1'))
+        await q.edit_message_text(
+            f'{t(uid,"confirm_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n'
+            f'📝 {html.escape(p[:500])}\n\n'
+            f'📐 {d.split(":",1)[1]}\n'
+            f'💰 {cost} 🪙\n\n',
+            parse_mode=ParseMode.HTML, reply_markup=kb_confirm(uid, token)); return
+    if d.startswith('ok:'):
+        token = d[3:]
+        item = context.user_data.get('pending',{}).pop(token, None)
+        if not item:
+            await q.edit_message_text('❌', reply_markup=kb_menu(uid)); return
+        cost = int(setting('image_cost','1'))
+        if balance(uid) < cost:
+            await q.edit_message_text(t(uid,'insufficient_coins'), reply_markup=kb_menu(uid)); return
+        change_balance(uid, -cost)
+        p, size = item
+        job_id = str(uuid.uuid4())
+        async with job_lock:
+            pos = len([j for j in pending_jobs if not j.get('cancelled')]) + 1
+            job = {'job_id': job_id, 'uid': uid, 'chat': q.message.chat_id,
+                   'prompt': p, 'size': size, 'msg_id': q.message.message_id,
+                   'last_pos': pos, 'cancelled': False}
+            pending_jobs.append(job)
+        await q.edit_message_text(
+            f'{t(uid,"queue_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n'
+            f'📐 {size}\n'
+            f'📝 {html.escape(p[:120])}\n\n'
+            f'{t(uid,"queue_pos")}: <b>{pos}</b>',
+            parse_mode=ParseMode.HTML, reply_markup=kb_queue_cancel(uid, job_id))
+        return
+    if d.startswith('no:'):
+        context.user_data.pop('waiting', None)
+        await q.edit_message_text('❌', reply_markup=kb_menu(uid)); return
+
+async def render_ticket_to_user(q, context, tid):
+    uid = q.from_user.id
+    t_ = get_ticket(tid)
+    msgs = ticket_msgs(tid)
+    lines = [f'🆘 <b>#{tid}</b> ({t_["status"]})', '━━━━━━━━━━━━━━━━━━━━', '']
+    photos = []
+    for m in msgs:
+        who = '👤 ' + ('Ты' if get_lang(uid)=='ru' else 'You') if m['sender'] == 'user' else '🛠 Support'
+        body = m['text'] or ('📷' if m['photo_file_id'] else '')
+        lines.append(f'{who} <i>{m["created_at"]}</i>\n{html.escape(body)}')
+        if m['photo_file_id']: photos.append((m['photo_file_id'], f'#{tid}'))
+    kb = kb_ticket_user(uid, tid) if t_['status'] == 'open' else kb_support(uid, get_open_ticket(uid))
+    await q.edit_message_text('\n\n'.join(lines), parse_mode=ParseMode.HTML, reply_markup=kb)
+    for fid, cap in photos[-5:]:
+        try: await context.bot.send_photo(q.message.chat_id, fid, caption=cap)
+        except Exception: pass
+
+async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    u = update.effective_user
+    ensure_user(u)
+    uid = u.id
+
+    text = (update.message.text or '').strip()
+    photo = update.message.photo[-1].file_id if update.message.photo else None
+
+    if is_banned(uid):
+        await update.message.reply_text(t(uid,'banned_access')); return
+    if not has_accepted(uid):
+        terms = TERMS_TEXT_TPL.format(
+            title=t(uid,'terms_title'),
+            lead=t(uid,'terms_lead'),
+            privacy=PRIVACY_URL, privacy_t=t(uid,'terms_privacy'),
+            offer=OFFER_URL, offer_t=t(uid,'terms_offer'),
+            note=t(uid,'terms_note'))
+        await update.message.reply_text(terms, parse_mode=ParseMode.HTML,
+                                        reply_markup=kb_terms(uid), disable_web_page_preview=True)
+        return
+
+    # ── админ: ответ на тикет ──
+    if is_admin(uid) and context.user_data.get('admin_reply_ticket'):
+        tid = context.user_data.pop('admin_reply_ticket')
+        if not text and not photo: await update.message.reply_text('❌'); return
+        t_ = get_ticket(tid)
+        if not t_: await update.message.reply_text('❌'); return
+        if t_['status'] != 'open': await update.message.reply_text('❌'); return
+        add_ticket_msg(tid, 'admin', text or None, photo)
+        try:
+            owner = t_['user_id']
+            reply = t(owner,'support_reply', tid=tid)
+            if photo:
+                await context.bot.send_photo(owner, photo,
+                    caption=f'{reply}\n\n{html.escape(text or "")}\n\n<i>{t(owner,"reply_here")}</i>',
+                    parse_mode=ParseMode.HTML)
+            else:
+                await context.bot.send_message(owner,
+                    f'{reply}\n\n{html.escape(text)}\n\n<i>{t(owner,"reply_here")}</i>',
+                    parse_mode=ParseMode.HTML)
+            await update.message.reply_text('✅')
+        except Exception as e:
+            await update.message.reply_text(f'❌ {e}')
+        return
+
+    # ── админ: обычные вводы ──
+    if is_admin(uid) and context.user_data.get('admin_input'):
+        key = context.user_data.pop('admin_input')
+        try: iv = int(text)
+        except ValueError: await update.message.reply_text('❌'); return
+        if key in ('timeout',) and iv < 30: await update.message.reply_text('❌ min 30'); return
+        if key in ('coin_rate','rate_limit_count','rate_limit_window') and iv < 1:
+            await update.message.reply_text('❌ min 1'); return
+        if key == 'ref_percent' and (iv < 0 or iv > 100): await update.message.reply_text('❌ 0-100'); return
+        set_setting(key, iv)
+        await update.message.reply_text(f'✅ <b>{key}</b> = <code>{iv}</code>', parse_mode=ParseMode.HTML)
+        return
+
+    if is_admin(uid) and context.user_data.get('admin_setbal'):
+        target = context.user_data.pop('admin_setbal')
+        try: amount = int(text)
+        except ValueError: await update.message.reply_text('❌'); return
+        set_balance_exact(target, amount)
+        await update.message.reply_text(f'✅ <code>{target}</code> = <b>{amount}</b> 🪙', parse_mode=ParseMode.HTML)
+        try: await context.bot.send_message(target, f'🪙 <b>{amount}</b>', parse_mode=ParseMode.HTML)
+        except Exception: pass
+        return
+    if is_admin(uid) and context.user_data.get('admin_addbal'):
+        target = context.user_data.pop('admin_addbal')
+        try: amount = int(text)
+        except ValueError: await update.message.reply_text('❌'); return
+        change_balance(target, amount)
+        await update.message.reply_text(f'✅ <code>{target}</code> {amount:+d}\n🪙 <b>{balance(target)}</b>', parse_mode=ParseMode.HTML)
+        try: await context.bot.send_message(target, f'🪙 <b>{amount:+d}</b> → {balance(target)}', parse_mode=ParseMode.HTML)
+        except Exception: pass
+        return
+    if is_admin(uid) and context.user_data.get('admin_setrub'):
+        target = context.user_data.pop('admin_setrub')
+        try: amount = int(text)
+        except ValueError: await update.message.reply_text('❌'); return
+        set_rub_exact(target, amount)
+        await update.message.reply_text(f'✅ <code>{target}</code> = <b>{amount} ₽</b>', parse_mode=ParseMode.HTML)
+        return
+    if is_admin(uid) and context.user_data.get('admin_addrub'):
+        target = context.user_data.pop('admin_addrub')
+        try: amount = int(text)
+        except ValueError: await update.message.reply_text('❌'); return
+        if amount == 0: await update.message.reply_text('❌'); return
+        ref_result = topup_rub(target, amount, method='manual', by_admin=uid)
+        msg = f'✅ <code>{target}</code> +{amount} ₽ → {rub_balance(target)} ₽'
+        if ref_result:
+            referrer, bonus = ref_result
+            msg += f'\n💸 +{bonus} ₽ → <code>{referrer}</code>'
+            try:
+                await context.bot.send_message(referrer,
+                    f'💸 <b>Реферальный бонус!</b>\n\n+<b>{bonus} ₽</b> ({ref_percent()}%)',
+                    parse_mode=ParseMode.HTML)
+            except Exception: pass
+        await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
+        try:
+            await context.bot.send_message(target,
+                f'💵 <b>+{amount} ₽</b>\n💵 {rub_balance(target)} ₽',
+                parse_mode=ParseMode.HTML, reply_markup=kb_menu(target))
+        except Exception: pass
+        return
+    if is_admin(uid) and context.user_data.get('admin_broadcast'):
+        context.user_data.pop('admin_broadcast')
+        if not text: await update.message.reply_text('❌'); return
+        await do_broadcast(context.application, update, text); return
+    if is_admin(uid) and context.user_data.get('admin_user_lookup'):
+        context.user_data.pop('admin_user_lookup')
+        try: target = int(text)
+        except ValueError: await update.message.reply_text('❌'); return
+        await show_user_card(update.message, target); return
+    if is_admin(uid) and context.user_data.get('admin_ban_reason'):
+        target = context.user_data.pop('admin_ban_reason')
+        reason = text or '—'
+        set_ban(target, True, reason, uid)
+        await update.message.reply_text(f'⛔ <code>{target}</code>\n{html.escape(reason)}', parse_mode=ParseMode.HTML)
+        try:
+            await context.bot.send_message(target,
+                f'{t(target,"banned_title")}\n\n{t(target,"banned_reason")}: {html.escape(reason)}',
+                parse_mode=ParseMode.HTML)
+        except Exception: pass
+        return
+
+    # ── админ: создание промокода через UI ──
+    if is_admin(uid) and context.user_data.get('promo_step'):
+        step = context.user_data['promo_step']
+        if step == 'code':
+            code = text.upper().replace(' ','')
+            if not code or len(code) > 40:
+                await update.message.reply_text('❌ Код: 1–40 символов без пробелов.'); return
+            if get_promo(code):
+                await update.message.reply_text('❌ Такой код уже есть.'); return
+            context.user_data['promo_data'] = {'code': code}
+            context.user_data['promo_step'] = 'amount'
+            await update.message.reply_text(f'✅ Код: <code>{code}</code>\n\n💰 Сумма монет?', parse_mode=ParseMode.HTML)
+            return
+        if step == 'amount':
+            try: amount = int(text)
+            except ValueError: await update.message.reply_text('❌ Число.'); return
+            if amount <= 0: await update.message.reply_text('❌ >0.'); return
+            context.user_data['promo_data']['amount'] = amount
+            context.user_data['promo_step'] = 'uses'
+            await update.message.reply_text(f'✅ Монет: <b>{amount}</b>\n\n🔢 Сколько активаций?', parse_mode=ParseMode.HTML)
+            return
+        if step == 'uses':
+            try: uses = int(text)
+            except ValueError: await update.message.reply_text('❌ Число.'); return
+            if uses <= 0: await update.message.reply_text('❌ >0.'); return
+            context.user_data['promo_data']['uses'] = uses
+            context.user_data['promo_step'] = 'days'
+            await update.message.reply_text(
+                f'✅ Активаций: <b>{uses}</b>\n\n⏰ Срок в днях?\n<i>Отправь 0 или «нет», чтобы без срока.</i>',
+                parse_mode=ParseMode.HTML)
+            return
+        if step == 'days':
+            v = text.lower()
+            days = None
+            if v not in ('0','нет','no','-'):
+                try: days = int(text)
+                except ValueError: await update.message.reply_text('❌ Число или 0.'); return
+                if days <= 0: days = None
+            data = context.user_data.pop('promo_data', {})
+            context.user_data.pop('promo_step', None)
+            ok, err = create_promo(data['code'], data['amount'], data['uses'], days, uid)
+            if not ok:
+                await update.message.reply_text(f'❌ {err}'); return
+            exp = f'\n⏰ До: {days} дн.' if days else ''
+            await update.message.reply_text(
+                f'✅ Промокод <code>{data["code"]}</code>\n'
+                f'🪙 {data["amount"]} • 🔢 {data["uses"]}{exp}',
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb_promos_main())
+            return
+
+    waiting = context.user_data.get('waiting')
+
+    if waiting == 'exchange_rub':
+        context.user_data.pop('waiting', None)
+        try: rub = int(text)
+        except ValueError:
+            await update.message.reply_text('❌', reply_markup=kb_menu(uid)); return
+        ok, res = exchange_rub_to_coins(uid, rub)
+        if not ok:
+            msg = {'bad_amount':'❌','not_multiple':t(uid,'exchange_must_be_multiple',rate=coin_rate()),
+                   'not_enough_rub':t(uid,'not_enough_rub')}.get(res,'❌')
+            await update.message.reply_text(msg, reply_markup=kb_menu(uid)); return
+        await update.message.reply_text(
+            f'{t(uid,"exchange_done")}\n━━━━━━━━━━━━━━━━━━━━\n\n'
+            f'💵 {t(uid,"exchange_spent")}: <b>{rub} ₽</b>\n'
+            f'🪙 {t(uid,"exchange_got")}: <b>+{res} 🪙</b>\n\n'
+            f'💵 {t(uid,"rubles")}: <b>{rub_balance(uid)} ₽</b>\n'
+            f'🪙 {t(uid,"coins")}: <b>{balance(uid)}</b>',
+            parse_mode=ParseMode.HTML, reply_markup=kb_menu(uid))
+        return
+
+    if waiting == 'promo':
+        context.user_data.pop('waiting', None)
+        code = text.upper()
+        if not code:
+            await update.message.reply_text('❌'); return
+        ok, res = activate_promo(code, uid)
+        if not ok:
+            msg = {'not_found':'❌','exhausted':'❌','expired':'❌','already_used':'❌'}.get(res,'❌')
+            await update.message.reply_text(msg, reply_markup=kb_menu(uid)); return
+        await update.message.reply_text(
+            f'{t(uid,"promo_ok")}\n\n{t(uid,"promo_credited", n=res)}\n🪙 {t(uid,"coins")}: <b>{balance(uid)}</b>',
+            parse_mode=ParseMode.HTML, reply_markup=kb_menu(uid))
+        return
+
+    if waiting == 'ticket':
+        context.user_data.pop('waiting', None)
+        if not text and not photo:
+            await update.message.reply_text('❌'); return
+        tid = create_ticket(uid, text or None, photo)
+        await update.message.reply_text(
+            t(uid,'support_created',tid=tid), parse_mode=ParseMode.HTML, reply_markup=kb_menu(uid))
+        try:
+            preview = text or '📷'
+            await context.bot.send_message(ADMIN_ID,
+                f'🆘 <b>Новый тикет #{tid}</b>\n👤 <code>{uid}</code>\n\n📝 {html.escape(preview[:1500])}',
+                parse_mode=ParseMode.HTML, reply_markup=kb_ticket_admin(tid))
+            if photo:
+                await context.bot.send_photo(ADMIN_ID, photo, caption=f'📷 #{tid}')
+        except Exception: pass
+        return
+
+    if waiting == 'image':
+        if not text:
+            await update.message.reply_text('❌'); return
+        if len(text) > 4000:
+            await update.message.reply_text('❌'); return
+        cost = int(setting('image_cost','1'))
+        if balance(uid) < cost:
+            await update.message.reply_text(t(uid,'insufficient_coins'), reply_markup=kb_menu(uid)); return
+        context.user_data['waiting'] = None
+        m = await update.message.reply_text(t(uid,'checking'))
+        try:
+            ok, reason = await moderate(text)
+        except Exception as e:
+            await m.edit_text('❌')
+            await alog(context.application, f'⚠️ Moderation error\n<code>{html.escape(str(e)[:800])}</code>', level=1)
+            return
+        if not ok:
+            await m.edit_text(f'{t(uid,"blocked")}\n\n{html.escape(reason)}',
+                              parse_mode=ParseMode.HTML, reply_markup=kb_menu(uid)); return
+        context.user_data['prompt'] = text
+        await m.edit_text(t(uid,'choose_size'), parse_mode=ParseMode.HTML, reply_markup=kb_sizes(uid))
+        return
+
+    tid = get_open_ticket(uid)
+    if tid:
+        if not text and not photo: return
+        add_ticket_msg(tid, 'user', text or None, photo)
+        await update.message.reply_text(t(uid,'ticket_msg_added',tid=tid), reply_markup=kb_menu(uid))
+        try:
+            preview = text or '📷'
+            await context.bot.send_message(ADMIN_ID,
+                f'💬 <b>#{tid}</b> от <code>{uid}</code>:\n\n{html.escape(preview[:1500])}',
+                parse_mode=ParseMode.HTML, reply_markup=kb_ticket_admin(tid))
+            if photo:
+                await context.bot.send_photo(ADMIN_ID, photo, caption=f'📷 #{tid}')
+        except Exception: pass
+        return
+
+    await update.message.reply_text(t(uid,'menu_hint'), reply_markup=kb_menu(uid))
+
+# ─────────── admin panel ───────────
+async def show_user_card(message, uid):
+    u = get_user(uid)
+    if not u:
+        await message.reply_text('❌'); return
+    total, earned = ref_stats(uid)
+    is_adm = '👑 да' if is_admin(uid) else 'нет'
+    txt = (
+        f'👤 <b>Пользователь</b>\n━━━━━━━━━━━━━━━━━━━━\n'
+        f'🆔 <code>{u["user_id"]}</code>\n'
+        f'📛 {html.escape(u["full_name"] or "—")}\n'
+        f'🔗 @{u["username"] or "—"}\n'
+        f'🌐 {u["lang"] or "ru"}\n'
+        f'💵 Рубли: <b>{u["rub_balance"]} ₽</b>\n'
+        f'🪙 Монеты: <b>{u["balance"]}</b>\n'
+        f'👑 Админ: {is_adm}\n'
+        f'📅 Регистрация: {u["created_at"]}\n'
+        f'👀 Последний визит: {u["last_seen"]}\n'
+        f'👥 Пригласил: {total} • заработал: {earned} ₽\n'
+        f'🚫 Бан: {"да — " + html.escape(u["ban_reason"] or "") if u["banned"] else "нет"}'
+    )
+    await message.reply_text(txt, parse_mode=ParseMode.HTML, reply_markup=kb_user_card(uid))
+
+async def handle_admin_cb(q, context, d):
+    if d == 'adm:main':
+        await q.edit_message_text(admin_panel_text(), parse_mode=ParseMode.HTML, reply_markup=kb_admin()); return
+    if d == 'adm:stats':
+        c = db()
+        users = c.execute('SELECT COUNT(*) AS n FROM users').fetchone()['n']
+        banned = c.execute('SELECT COUNT(*) AS n FROM users WHERE banned=1').fetchone()['n']
+        gens  = c.execute('SELECT COUNT(*) AS n FROM history').fetchone()['n']
+        ok    = c.execute('SELECT COUNT(*) AS n FROM history WHERE status="success"').fetchone()['n']
+        err   = c.execute('SELECT COUNT(*) AS n FROM history WHERE status="error"').fetchone()['n']
+        touts = c.execute('SELECT COUNT(*) AS n FROM history WHERE status="timeout"').fetchone()['n']
+        opent = c.execute('SELECT COUNT(*) AS n FROM tickets WHERE status="open"').fetchone()['n']
+        topup_sum = c.execute('SELECT COALESCE(SUM(amount),0) AS s FROM topups').fetchone()['s']
+        ref_sum = c.execute('SELECT COALESCE(SUM(amount),0) AS s FROM ref_earnings').fetchone()['s']
+        admins_count = c.execute('SELECT COUNT(*) AS n FROM admins').fetchone()['n'] + 1
+        avg, mn, mx, cnt = gen_time_stats()
+        time_line = ''
+        if cnt:
+            time_line = (f'\n⏱ Время генерации:\n'
+                         f'   • среднее: <b>{fmt_duration(avg)}</b>\n'
+                         f'   • мин: {fmt_duration(mn)} • макс: {fmt_duration(mx)}\n'
+                         f'   • замеров: {cnt}\n')
+        txt = (
+            '📊 <b>Статистика</b>\n━━━━━━━━━━━━━━━━━━━━\n\n'
+            f'👥 Пользователей: <b>{users}</b>\n'
+            f'👑 Админов: <b>{admins_count}</b>\n'
+            f'🚫 Забанено: <b>{banned}</b>\n'
+            f'🆘 Открытых тикетов: <b>{opent}</b>\n\n'
+            f'💵 Пополнений: <b>{topup_sum} ₽</b>\n'
+            f'💸 Реф-выплат: <b>{ref_sum} ₽</b>\n\n'
+            f'🎨 Генераций: <b>{gens}</b>\n'
+            f'✅ Успешно: <b>{ok}</b>\n'
+            f'❌ Ошибок: <b>{err}</b>\n'
+            f'⏱ Таймаутов: <b>{touts}</b>\n'
+            f'{time_line}'
+        )
+        await q.edit_message_text(txt, parse_mode=ParseMode.HTML, reply_markup=kb_admin()); return
+    if d == 'adm:tickets':
+        rows = list_open_tickets()
+        if not rows:
+            await q.edit_message_text('🆘 Нет открытых тикетов.', reply_markup=kb_admin()); return
+        lines = ['🆘 <b>Открытые тикеты</b>', '━━━━━━━━━━━━━━━━━━━━', '']
+        for r in rows:
+            lines.append(f'<b>#{r["id"]}</b> • 👤 <code>{r["user_id"]}</code> • {r["updated_at"]}')
+        await q.edit_message_text('\n'.join(lines) + '\n\nОткрыть: /ticket ID',
+                                  parse_mode=ParseMode.HTML, reply_markup=kb_admin()); return
+    if d == 'adm:user':
+        context.user_data['admin_user_lookup'] = True
+        await q.edit_message_text('👥 Отправь ID пользователя:'); return
+    if d.startswith('adm:hist:'):
+        uid = int(d.split(':',2)[2])
+        rows = user_history(uid, 20)
+        if not rows:
+            await q.edit_message_text('📜 История пуста.', reply_markup=kb_user_card(uid)); return
+        lines = [f'📜 <b>История</b> <code>{uid}</code>', '━━━━━━━━━━━━━━━━━━━━', '']
+        for i, r in enumerate(rows, 1):
+            icon = '✅' if r['status'] == 'success' else '❌'
+            t_extra = f' • ⏱ {fmt_duration(r["elapsed"])}' if r['elapsed'] else ''
+            lines.append(f'{i}. {icon} {html.escape(r["prompt"][:60])}\n   <i>{r["size"]} • {r["created_at"]}{t_extra}</i>')
+        await q.edit_message_text('\n'.join(lines), parse_mode=ParseMode.HTML, reply_markup=kb_user_card(uid)); return
+    if d.startswith('adm:ban:'):
+        uid = int(d.split(':',2)[2])
+        cur = get_user(uid)
+        if cur['banned']:
+            set_ban(uid, False)
+            await q.edit_message_text(f'✅ <code>{uid}</code> разбанен.', parse_mode=ParseMode.HTML)
+            await show_user_card(q.message, uid)
+        else:
+            context.user_data['admin_ban_reason'] = uid
+            await q.edit_message_text(f'✍️ Причина бана <code>{uid}</code>:', parse_mode=ParseMode.HTML)
+        return
+    if d.startswith('adm:setbal:'):
+        uid = int(d.split(':',2)[2])
+        context.user_data['admin_setbal'] = uid
+        await q.edit_message_text(f'💰 Точное значение монет для <code>{uid}</code> (сейчас {balance(uid)}):',
+            parse_mode=ParseMode.HTML); return
+    if d.startswith('adm:addbal:'):
+        uid = int(d.split(':',2)[2])
+        context.user_data['admin_addbal'] = uid
+        await q.edit_message_text(f'🪙 Сдвиг монет для <code>{uid}</code> (сейчас {balance(uid)}):',
+            parse_mode=ParseMode.HTML); return
+    if d.startswith('adm:addrub:'):
+        uid = int(d.split(':',2)[2])
+        context.user_data['admin_addrub'] = uid
+        await q.edit_message_text(
+            f'💵 Сумма в рублях для <code>{uid}</code> (сейчас {rub_balance(uid)} ₽):\n'
+            f'<i>{ref_percent()}% уйдёт рефереру, если он есть.</i>',
+            parse_mode=ParseMode.HTML); return
+    if d == 'adm:broadcast':
+        context.user_data['admin_broadcast'] = True
+        await q.edit_message_text('📢 Отправь текст для рассылки.'); return
+    if d == 'adm:banlist':
+        rows = list_banned()
+        if not rows:
+            await q.edit_message_text('🚫 Бан-лист пуст.', reply_markup=kb_admin()); return
+        lines = ['🚫 <b>Бан-лист</b>', '━━━━━━━━━━━━━━━━━━━━', '']
+        for r in rows:
+            lines.append(f'<code>{r["user_id"]}</code> • {html.escape(r["full_name"] or "—")}')
+            lines.append(f'   ⏰ {r["banned_at"]}\n   💬 {html.escape(r["ban_reason"] or "—")}')
+        await q.edit_message_text('\n'.join(lines), parse_mode=ParseMode.HTML, reply_markup=kb_admin()); return
+
+    # ── промокоды UI ──
+    if d == 'adm:promos':
+        context.user_data.pop('promo_step', None)
+        context.user_data.pop('promo_data', None)
+        await q.edit_message_text(
+            '🎁 <b>Промокоды</b>\n━━━━━━━━━━━━━━━━━━━━\n\nВыбери действие:',
+            parse_mode=ParseMode.HTML, reply_markup=kb_promos_main()); return
+    if d == 'adm:promo:new':
+        context.user_data['promo_step'] = 'code'
+        context.user_data['promo_data'] = {}
+        await q.edit_message_text(
+            '🎁 <b>Создание промокода</b>\n\n<b>Шаг 1/4.</b> Введи код (латиница/цифры, без пробелов):',
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('◀️ Отмена', callback_data='adm:promos')]]))
+        return
+    if d == 'adm:promo:list':
+        rows = list_promos()
+        if not rows:
+            await q.edit_message_text('📋 Нет промокодов.', reply_markup=kb_promos_main()); return
+        await q.edit_message_text(
+            '📋 <b>Все промокоды</b>\n\nНажми на код, чтобы удалить:',
+            parse_mode=ParseMode.HTML, reply_markup=kb_promo_list())
+        return
+    if d.startswith('adm:promo:del:'):
+        code = d.split(':',3)[3]
+        delete_promo(code)
+        await q.edit_message_text(
+            f'✅ Промокод <code>{code}</code> удалён.',
+            parse_mode=ParseMode.HTML, reply_markup=kb_promos_main())
+        return
+
+    if d == 'adm:settings':
+        await q.edit_message_text('⚙️ <b>Настройки</b>\n━━━━━━━━━━━━━━━━━━━━',
+                                  parse_mode=ParseMode.HTML, reply_markup=kb_admin_settings()); return
+    if d == 'adm:ratelimit':
+        await q.edit_message_text(
+            f'⏳ <b>Rate-limit</b>\n━━━━━━━━━━━━━━━━━━━━\n\n'
+            f'Максимум <b>{rate_limit_count()}</b> генераций за <b>{rate_limit_window()}</b> сек.',
+            parse_mode=ParseMode.HTML, reply_markup=kb_admin_ratelimit()); return
+    if d == 'adm:log':
+        cur = int(setting('log_level','2'))
+        cur = (cur + 1) % 4
+        set_setting('log_level', cur)
+        await q.edit_message_text('⚙️ <b>Настройки</b>', parse_mode=ParseMode.HTML, reply_markup=kb_admin_settings()); return
+    if d.startswith('adm:set:'):
+        key = d.split(':',2)[2]
+        context.user_data['admin_input'] = key
+        await q.edit_message_text(f'⚙️ Новое значение для <b>{key}</b>:', parse_mode=ParseMode.HTML); return
+
+def admin_panel_text():
+    return '🛠 <b>Админ-панель</b>\n━━━━━━━━━━━━━━━━━━━━\n\n/admin_help — все команды'
+
+async def do_broadcast(app, update, text):
+    rows = db().execute('SELECT user_id FROM users').fetchall()
+    total = len(rows); ok = 0; fail = 0
+    m = await update.message.reply_text(f'📢 Рассылка ({total})…')
+    for r in rows:
+        try:
+            await app.bot.send_message(r['user_id'], text, parse_mode=ParseMode.HTML)
+            ok += 1
+        except Exception: fail += 1
+        await asyncio.sleep(0.05)
+    await m.edit_text(f'✅ Доставлено: {ok}\nОшибок: {fail}')
+
+# ─────────── admin commands ───────────
+async def cmd_admin(update, context):
+    if not is_admin(update.effective_user.id): return
+    await update.message.reply_text(admin_panel_text(), parse_mode=ParseMode.HTML, reply_markup=kb_admin())
+
+async def cmd_admin_help(update, context):
+    if not is_admin(update.effective_user.id): return
+    await update.message.reply_text(ADMIN_HELP, parse_mode=ParseMode.HTML)
+
+async def cmd_stats(update, context):
+    if not is_admin(update.effective_user.id): return
+    c = db()
+    users = c.execute('SELECT COUNT(*) AS n FROM users').fetchone()['n']
+    gens  = c.execute('SELECT COUNT(*) AS n FROM history').fetchone()['n']
+    opent = c.execute('SELECT COUNT(*) AS n FROM tickets WHERE status="open"').fetchone()['n']
+    topup_sum = c.execute('SELECT COALESCE(SUM(amount),0) AS s FROM topups').fetchone()['s']
+    admins_count = c.execute('SELECT COUNT(*) AS n FROM admins').fetchone()['n'] + 1
+    avg, mn, mx, cnt = gen_time_stats()
+    time_line = f'\n⏱ Средн. генерация: {fmt_duration(avg)} ({cnt})' if cnt else ''
+    await update.message.reply_text(
+        f'📊 Пользователей: {users}\n👑 Админов: {admins_count}\n🎨 Генераций: {gens}\n'
+        f'🆘 Открытых: {opent}\n💵 Пополнений: {topup_sum} ₽\n'
+        f'⏱ Таймаут: {get_timeout()} сек\n📊 Курс: 1 🪙 = {coin_rate()} ₽\n💸 Реф: {ref_percent()}%'
+        f'\n⏳ Rate: {rate_limit_count()}/{rate_limit_window()}с{time_line}')
+
+async def cmd_user(update, context):
+    if not is_admin(update.effective_user.id) or not context.args:
+        await update.message.reply_text('/user ID'); return
+    try: uid = int(context.args[0])
+    except ValueError: await update.message.reply_text('❌'); return
+    await show_user_card(update.message, uid)
+
+async def cmd_ticket(update, context):
+    if not is_admin(update.effective_user.id) or not context.args:
+        await update.message.reply_text('/ticket ID'); return
+    try: tid = int(context.args[0])
+    except ValueError: await update.message.reply_text('❌'); return
+    t_ = get_ticket(tid)
+    if not t_: await update.message.reply_text('❌'); return
+    msgs = ticket_msgs(tid)
+    lines = [f'🆘 <b>#{tid}</b> ({t_["status"]})', f'👤 <code>{t_["user_id"]}</code>', '━━━━━━━━━━━━━━━━━━━━', '']
+    photos = []
+    for m in msgs:
+        who = '👤' if m['sender'] == 'user' else '🛠'
+        body = m['text'] or ('📷' if m['photo_file_id'] else '')
+        lines.append(f'{who} <i>{m["created_at"]}</i>\n{html.escape(body)}')
+        if m['photo_file_id']: photos.append((m['photo_file_id'], f'#{tid}'))
+    kb = kb_ticket_admin(tid) if t_['status'] == 'open' else None
+    await update.message.reply_text('\n\n'.join(lines), parse_mode=ParseMode.HTML, reply_markup=kb)
+    for fid, cap in photos[-10:]:
+        try: await update.message.reply_photo(fid, caption=cap)
+        except Exception: pass
+
+async def cmd_setbalance(update, context):
+    if not is_admin(update.effective_user.id) or len(context.args) != 2:
+        await update.message.reply_text('/setbalance ID N'); return
+    try: uid = int(context.args[0]); amount = int(context.args[1])
+    except ValueError: await update.message.reply_text('❌'); return
+    ensure_user_by_id(uid); set_balance_exact(uid, amount)
+    await update.message.reply_text(f'✅ <code>{uid}</code> = <b>{amount}</b> 🪙', parse_mode=ParseMode.HTML)
+    try: await context.bot.send_message(uid, f'🪙 <b>{amount}</b>', parse_mode=ParseMode.HTML)
+    except Exception: pass
+
+async def cmd_addbalance(update, context):
+    if not is_admin(update.effective_user.id) or len(context.args) != 2:
+        await update.message.reply_text('/addbalance ID N'); return
+    try: uid = int(context.args[0]); amount = int(context.args[1])
+    except ValueError: await update.message.reply_text('❌'); return
+    ensure_user_by_id(uid); change_balance(uid, amount)
+    await update.message.reply_text(f'✅ <code>{uid}</code> {amount:+d} → <b>{balance(uid)}</b>', parse_mode=ParseMode.HTML)
+
+async def cmd_setrub(update, context):
+    if not is_admin(update.effective_user.id) or len(context.args) != 2:
+        await update.message.reply_text('/setrub ID N'); return
+    try: uid = int(context.args[0]); amount = int(context.args[1])
+    except ValueError: await update.message.reply_text('❌'); return
+    ensure_user_by_id(uid); set_rub_exact(uid, amount)
+    await update.message.reply_text(f'✅ <code>{uid}</code> = <b>{amount} ₽</b>', parse_mode=ParseMode.HTML)
+
+async def cmd_addrub(update, context):
+    if not is_admin(update.effective_user.id) or len(context.args) != 2:
+        await update.message.reply_text('/addrub ID N'); return
+    try: uid = int(context.args[0]); amount = int(context.args[1])
+    except ValueError: await update.message.reply_text('❌'); return
+    ensure_user_by_id(uid)
+    r = topup_rub(uid, amount, method='manual', by_admin=update.effective_user.id)
+    msg = f'✅ <code>{uid}</code> +{amount} ₽ → {rub_balance(uid)} ₽'
+    if r:
+        ref, bonus = r
+        msg += f'\n💸 +{bonus} ₽ → <code>{ref}</code>'
+        try: await context.bot.send_message(ref, f'💸 +<b>{bonus} ₽</b>', parse_mode=ParseMode.HTML)
+        except Exception: pass
+    await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
+
+async def cmd_setadmin(update, context):
+    if not is_admin(update.effective_user.id) or len(context.args) != 1:
+        await update.message.reply_text('/setadmin ID'); return
+    try: uid = int(context.args[0])
+    except ValueError: await update.message.reply_text('❌'); return
+    if uid == ADMIN_ID:
+        await update.message.reply_text('👑 Супер-админ.'); return
+    ensure_user_by_id(uid)
+    if is_admin(uid):
+        await update.message.reply_text('ℹ️ Уже админ.'); return
+    add_admin(uid, update.effective_user.id)
+    await update.message.reply_text(f'👑 <code>{uid}</code> назначен админом.', parse_mode=ParseMode.HTML)
+    try: await context.bot.send_message(uid, '👑 <b>Ты админ.</b>\n/admin', parse_mode=ParseMode.HTML)
+    except Exception: pass
+
+async def cmd_unadmin(update, context):
+    if not is_admin(update.effective_user.id) or len(context.args) != 1:
+        await update.message.reply_text('/unadmin ID'); return
+    try: uid = int(context.args[0])
+    except ValueError: await update.message.reply_text('❌'); return
+    if uid == ADMIN_ID:
+        await update.message.reply_text('❌ Нельзя.'); return
+    if not is_admin(uid):
+        await update.message.reply_text('ℹ️ Не админ.'); return
+    remove_admin(uid)
+    await update.message.reply_text(f'✅ <code>{uid}</code> не админ.', parse_mode=ParseMode.HTML)
+    try: await context.bot.send_message(uid, '❌ <b>Права сняты.</b>', parse_mode=ParseMode.HTML)
+    except Exception: pass
+
+async def cmd_admins(update, context):
+    if not is_admin(update.effective_user.id): return
+    rows = list_admins()
+    lines = ['👑 <b>Админы</b>', '━━━━━━━━━━━━━━━━━━━━', '',
+             f'👑 <code>{ADMIN_ID}</code> — супер-админ']
+    for r in rows:
+        lines.append(f'• <code>{r["user_id"]}</code> (by <code>{r["added_by"]}</code>)')
+    await update.message.reply_text('\n'.join(lines), parse_mode=ParseMode.HTML)
+
+async def cmd_ban(update, context):
+    if not is_admin(update.effective_user.id) or not context.args:
+        await update.message.reply_text('/ban ID [причина]'); return
+    try: uid = int(context.args[0])
+    except ValueError: await update.message.reply_text('❌'); return
+    reason = ' '.join(context.args[1:]) or '—'
+    ensure_user_by_id(uid); set_ban(uid, True, reason, update.effective_user.id)
+    await update.message.reply_text(f'⛔ <code>{uid}</code>: {html.escape(reason)}', parse_mode=ParseMode.HTML)
+
+async def cmd_unban(update, context):
+    if not is_admin(update.effective_user.id) or len(context.args) != 1:
+        await update.message.reply_text('/unban ID'); return
+    try: uid = int(context.args[0])
+    except ValueError: await update.message.reply_text('❌'); return
+    set_ban(uid, False)
+    await update.message.reply_text(f'✅ <code>{uid}</code> разбанен.', parse_mode=ParseMode.HTML)
+
+async def cmd_setcost(update, context):
+    if not is_admin(update.effective_user.id): return
+    if not context.args:
+        await update.message.reply_text(f'/setcost N (сейчас {setting("image_cost","1")})'); return
+    try: v = int(context.args[0])
+    except ValueError: await update.message.reply_text('❌'); return
+    set_setting('image_cost', v)
+    await update.message.reply_text(f'✅ {v} 🪙', parse_mode=ParseMode.HTML)
+
+async def cmd_setrate(update, context):
+    if not is_admin(update.effective_user.id): return
+    if not context.args:
+        await update.message.reply_text(f'/setrate N (сейчас {coin_rate()})'); return
+    try: v = int(context.args[0])
+    except ValueError: await update.message.reply_text('❌'); return
+    if v < 1: await update.message.reply_text('❌ min 1'); return
+    set_setting('coin_rate', v)
+    await update.message.reply_text(f'✅ 1 🪙 = {v} ₽', parse_mode=ParseMode.HTML)
+
+async def cmd_setref(update, context):
+    if not is_admin(update.effective_user.id): return
+    if not context.args:
+        await update.message.reply_text(f'/setref N (сейчас {ref_percent()}%)'); return
+    try: v = int(context.args[0])
+    except ValueError: await update.message.reply_text('❌'); return
+    if v < 0 or v > 100: await update.message.reply_text('❌ 0–100'); return
+    set_setting('ref_percent', v)
+    await update.message.reply_text(f'✅ {v}%', parse_mode=ParseMode.HTML)
+
+async def cmd_settimeout(update, context):
+    if not is_admin(update.effective_user.id): return
+    if not context.args:
+        await update.message.reply_text(f'/settimeout N (сейчас {get_timeout()})'); return
+    try: sec = int(context.args[0])
+    except ValueError: await update.message.reply_text('❌'); return
+    if sec < 30: await update.message.reply_text('❌ min 30'); return
+    set_setting('timeout', sec)
+    await update.message.reply_text(f'✅ {sec} сек', parse_mode=ParseMode.HTML)
+
+async def cmd_broadcast(update, context):
+    if not is_admin(update.effective_user.id): return
+    text = ' '.join(context.args) if context.args else ''
+    if not text:
+        context.user_data['admin_broadcast'] = True
+        await update.message.reply_text('📢 Текст следующим сообщением.')
+        return
+    await do_broadcast(context.application, update, text)
+
+# ─────────── lifecycle ───────────
+async def post_init(app):
+    init_db()
+    n = int(setting('max_concurrent','1'))
+    for _ in range(n):
+        workers.append(asyncio.create_task(worker(app)))
+    workers.append(asyncio.create_task(queue_position_updater(app)))
+    await alog(app,
+        f'🟢 <b>ImagesGPT запущен</b>\n👷 Воркеров: <code>{n}</code>\n'
+        f'🎨 <code>{IMAGE_MODEL}</code>\n⏱ Таймаут: <code>{fmt_timeout()}</code>\n'
+        f'📊 Курс: <code>1 🪙 = {coin_rate()} ₽</code>\n💸 Реф: <code>{ref_percent()}%</code>\n'
+        f'⏳ Rate-limit: <code>{rate_limit_count()}/{rate_limit_window()}с</code>',
+        level=1)
+
+async def post_shutdown(app):
+    for w in workers: w.cancel()
+    await asyncio.gather(*workers, return_exceptions=True)
+    if _db is not None: _db.close()
+
+async def on_error(update, context):
+    log.error('Ошибка в хендлере: %s', context.error, exc_info=context.error)
+    try:
+        await context.application.bot.send_message(
+            ADMIN_ID,
+            f'⚠️ <b>Ошибка</b>\n<code>{html.escape(str(context.error)[:800])}</code>',
+            parse_mode=ParseMode.HTML)
+    except Exception:
+        pass
+
+def build_app():
+    app = (Application.builder()
+           .token(BOT_TOKEN)
+           .post_init(post_init)
+           .post_shutdown(post_shutdown)
+           .build())
+    app.add_handler(CommandHandler('start', cmd_start))
+    app.add_handler(CommandHandler('help', cmd_help))
+    app.add_handler(CommandHandler('admin', cmd_admin))
+    app.add_handler(CommandHandler('admin_help', cmd_admin_help))
+    app.add_handler(CommandHandler('stats', cmd_stats))
+    app.add_handler(CommandHandler('user', cmd_user))
+    app.add_handler(CommandHandler('ticket', cmd_ticket))
+    app.add_handler(CommandHandler('setbalance', cmd_setbalance))
+    app.add_handler(CommandHandler('addbalance', cmd_addbalance))
+    app.add_handler(CommandHandler('setrub', cmd_setrub))
+    app.add_handler(CommandHandler('addrub', cmd_addrub))
+    app.add_handler(CommandHandler('setadmin', cmd_setadmin))
+    app.add_handler(CommandHandler('unadmin', cmd_unadmin))
+    app.add_handler(CommandHandler('admins', cmd_admins))
+    app.add_handler(CommandHandler('ban', cmd_ban))
+    app.add_handler(CommandHandler('unban', cmd_unban))
+    app.add_handler(CommandHandler('setcost', cmd_setcost))
+    app.add_handler(CommandHandler('setrate', cmd_setrate))
+    app.add_handler(CommandHandler('setref', cmd_setref))
+    app.add_handler(CommandHandler('settimeout', cmd_settimeout))
+    app.add_handler(CommandHandler('broadcast', cmd_broadcast))
+    app.add_handler(CallbackQueryHandler(on_callbacks))
+    app.add_handler(MessageHandler((filters.TEXT & ~filters.COMMAND) | filters.PHOTO, on_message))
+    app.add_error_handler(on_error)
+    return app
+
+def run_once():
+    app = build_app()
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=False)
+
+def main_loop():
+    last_error = None
+    same_error_count = 0
+    MAX_SAME_ERRORS = 5
+    while True:
+        try:
+            log.info('Запуск бота…')
+            run_once()
+            log.info('Бот остановлен штатно.')
+            break
+        except KeyboardInterrupt:
+            log.info('Ctrl+C'); break
+        except SystemExit:
+            break
+        except Exception as e:
+            err_repr = f'{type(e).__name__}: {e}'
+            log.error('💥 Бот упал: %s\n%s', err_repr, traceback.format_exc())
+            if err_repr == last_error:
+                same_error_count += 1
+            else:
+                same_error_count = 1
+                last_error = err_repr
+            if same_error_count >= MAX_SAME_ERRORS:
+                log.error('❌ %s раз одна и та же ошибка. Останавливаюсь.', same_error_count)
+                break
+            if 'Conflict' in err_repr:
+                delay = 15
+            else:
+                delay = 5
+            log.info('Перезапуск через %s сек…', delay)
+            time.sleep(delay)
+
+if __name__ == '__main__':
+    main_loop()
