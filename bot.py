@@ -1,4 +1,4 @@
-import asyncio, base64, html, logging, sqlite3, time, uuid, traceback, random
+import asyncio, base64, html, logging, sqlite3, time, uuid, traceback, random, os
 from datetime import datetime, timedelta
 import httpx
 from telegram import (
@@ -10,7 +10,9 @@ from telegram.ext import (
     CallbackQueryHandler, ContextTypes, filters, PreCheckoutQueryHandler
 )
 
-# ─────────── config ───────────
+# ═══════════════════════════════════════════════════════════
+#  CONFIG
+# ═══════════════════════════════════════════════════════════
 BOT_TOKEN  = '8979688376:AAG_QM3t0NKOEiieC3_38wvb-ZsmziaXzRE'
 ADMIN_ID   = 8130244626
 API_KEY    = 'tc_live_6a7075340c595455d423a0471dc7a534d8450dddd9c6de39'
@@ -31,16 +33,19 @@ REF_L2 = 5
 ROULETTE_COOLDOWN_HOURS = 24
 ROULETTE_PRIZES = [(0,20),(1,35),(2,25),(3,12),(5,6),(10,2)]
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
-log = logging.getLogger('ImagesGPT')
-
+BANNERS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'banners')
 BANNER_KEYS = {
     'menu':'Главное меню','balance':'Баланс','topup':'Пополнение','exchange':'Обмен рублей',
     'history':'История','promo':'Промокод','ref':'Партнёрка','support':'Поддержка',
     'help':'Помощь','lang':'Язык',
 }
 
-# ─────────── i18n ───────────
+logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
+log = logging.getLogger('ImagesGPT')
+
+# ═══════════════════════════════════════════════════════════
+#  I18N
+# ═══════════════════════════════════════════════════════════
 LANGS=('ru','en')
 LANGS_NAMES={'ru':'🇷🇺 Русский','en':'🇬🇧 English'}
 TR={
@@ -151,7 +156,9 @@ TR={
 },
 }
 
-# ─────────── db ───────────
+# ═══════════════════════════════════════════════════════════
+#  DB
+# ═══════════════════════════════════════════════════════════
 _db=None
 def db():
     global _db
@@ -216,13 +223,11 @@ def init_db():
         c.execute('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)',(k,v))
     c.commit()
 
-def setting(key, default=None):
+def setting(key,default=None):
     r=db().execute('SELECT value FROM settings WHERE key=?',(key,)).fetchone()
     return r['value'] if r else default
-
 def set_setting(key,value):
     c=db(); c.execute('INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)',(key,str(value))); c.commit()
-
 def get_timeout():
     try: return int(setting('timeout',str(TIMEOUT_DEFAULT)))
     except: return TIMEOUT_DEFAULT
@@ -239,25 +244,121 @@ def rate_limit_window():
     try: return max(5,int(setting('rate_limit_window','60')))
     except: return 60
 
-# ─────────── banners ───────────
+# ═══════════════════════════════════════════════════════════
+#  BANNERS (DB + файлы из репозитория)
+# ═══════════════════════════════════════════════════════════
+def banner_file(key):
+    p=os.path.join(BANNERS_DIR,f'{key}.png')
+    return p if os.path.isfile(p) else None
+
+def db_has_banner(key):
+    return bool(db().execute('SELECT 1 FROM banners WHERE key=?',(key,)).fetchone())
+
 def get_banner(key):
+    """Возвращает ('id', file_id) | ('file', path) | None."""
     r=db().execute('SELECT file_id FROM banners WHERE key=?',(key,)).fetchone()
-    return r['file_id'] if r else None
+    if r: return ('id', r['file_id'])
+    p=banner_file(key)
+    if p: return ('file', p)
+    return None
+
 def set_banner(key,fid):
     c=db(); c.execute('INSERT OR REPLACE INTO banners(key,file_id,updated_at) VALUES(?,?,?)',
         (key,fid,datetime.now().isoformat(timespec='seconds'))); c.commit()
 def delete_banner(key):
     c=db(); c.execute('DELETE FROM banners WHERE key=?',(key,)); c.commit()
+
 def list_banners():
-    return {r['key'] for r in db().execute('SELECT key FROM banners').fetchall()}
+    """Все доступные ключи: из БД + из файлов."""
+    have={r['key'] for r in db().execute('SELECT key FROM banners').fetchall()}
+    if os.path.isdir(BANNERS_DIR):
+        for f in os.listdir(BANNERS_DIR):
+            if f.endswith('.png'):
+                k=f[:-4]
+                if k in BANNER_KEYS: have.add(k)
+    return have
+
+def banner_source(key):
+    """Возвращает описание источника для админского UI."""
+    has_db=db_has_banner(key); has_file=bool(banner_file(key))
+    if has_db and has_file: return '✅ БД (перекрывает файл) + 📁 файл в репо'
+    if has_db: return '✅ загружен через бота (БД)'
+    if has_file: return '📁 файл из репозитория'
+    return '⬜ нет'
+
 def _strip_header(bkey,text):
-    if not bkey or not get_banner(bkey): return text
+    if not bkey: return text
+    if not get_banner(bkey): return text
     lines=text.split('\n')
     if len(lines)>=2 and lines[1].strip() and set(lines[1].strip())<={'━'}:
         return '\n'.join(lines[2:]).lstrip('\n')
     return text
 
-# ─────────── API ───────────
+# ═══════════════════════════════════════════════════════════
+#  SCREENS
+# ═══════════════════════════════════════════════════════════
+async def show_screen(q, context, uid, bkey, text, kb):
+    msg=q.message
+    banner=get_banner(bkey) if bkey else None
+    use_photo=bool(banner) and len(text)<=CAPTION_MAX
+    was_photo=bool(msg.photo)
+    if use_photo:
+        text=_strip_header(bkey,text)
+        try:
+            btype,bval=banner
+            if btype=='id':
+                media=InputMediaPhoto(media=bval,caption=text,parse_mode=ParseMode.HTML)
+            else:
+                media=InputMediaPhoto(media=open(bval,'rb'),caption=text,parse_mode=ParseMode.HTML)
+            await msg.edit_media(media=media,reply_markup=kb)
+            return
+        except Exception as e:
+            log.warning('edit_media: %s',e)
+    if was_photo:
+        try: await msg.delete()
+        except: pass
+        try:
+            if use_photo:
+                btype,bval=banner
+                if btype=='id': await context.bot.send_photo(msg.chat_id,bval,caption=text,parse_mode=ParseMode.HTML,reply_markup=kb)
+                else: await context.bot.send_photo(msg.chat_id,open(bval,'rb'),caption=text,parse_mode=ParseMode.HTML,reply_markup=kb)
+            else:
+                await context.bot.send_message(msg.chat_id,text,parse_mode=ParseMode.HTML,reply_markup=kb)
+        except Exception as e:
+            log.warning('send fb: %s',e)
+        return
+    try: await msg.edit_text(text,parse_mode=ParseMode.HTML,reply_markup=kb)
+    except Exception as e:
+        log.warning('edit_text: %s',e)
+        try: await msg.delete()
+        except: pass
+        try:
+            if use_photo:
+                btype,bval=banner
+                if btype=='id': await context.bot.send_photo(msg.chat_id,bval,caption=text,parse_mode=ParseMode.HTML,reply_markup=kb)
+                else: await context.bot.send_photo(msg.chat_id,open(bval,'rb'),caption=text,parse_mode=ParseMode.HTML,reply_markup=kb)
+            else:
+                await context.bot.send_message(msg.chat_id,text,parse_mode=ParseMode.HTML,reply_markup=kb)
+        except: pass
+
+async def send_screen(update, uid, bkey, text, kb):
+    banner=get_banner(bkey) if bkey else None
+    use_photo=bool(banner) and len(text)<=CAPTION_MAX
+    if use_photo: text=_strip_header(bkey,text)
+    chat=update.effective_chat
+    if use_photo:
+        btype,bval=banner
+        try:
+            if btype=='id': await chat.send_photo(bval,caption=text,parse_mode=ParseMode.HTML,reply_markup=kb)
+            else: await chat.send_photo(open(bval,'rb'),caption=text,parse_mode=ParseMode.HTML,reply_markup=kb)
+            return
+        except Exception as e:
+            log.warning('send_photo: %s',e)
+    await chat.send_message(text,parse_mode=ParseMode.HTML,reply_markup=kb)
+
+# ═══════════════════════════════════════════════════════════
+#  API
+# ═══════════════════════════════════════════════════════════
 def api_list(typ=None):
     if typ: return db().execute('SELECT * FROM apis WHERE type=? ORDER BY priority ASC, id ASC',(typ,)).fetchall()
     return db().execute('SELECT * FROM apis ORDER BY type, priority ASC, id ASC').fetchall()
@@ -282,25 +383,29 @@ def api_active(typ):
         return [{'id':0,'name':'env','base_url':API_BASE,'api_key':API_KEY,'model':IMAGE_MODEL}]
     return [{'id':0,'name':'env','base_url':API_BASE,'api_key':API_KEY,'model':MODERATION_MODEL}]
 
-# ─────────── Stars ───────────
+# ═══════════════════════════════════════════════════════════
+#  STARS
+# ═══════════════════════════════════════════════════════════
 def stars_payment_exists(cid):
     return bool(db().execute('SELECT 1 FROM stars_payments WHERE charge_id=?',(cid,)).fetchone())
 def add_stars_payment(uid,stars,rub,cid):
     c=db(); c.execute('INSERT INTO stars_payments(user_id,stars,rub,charge_id,created_at) VALUES(?,?,?,?,?)',
         (uid,stars,rub,cid,datetime.now().isoformat(timespec='seconds'))); c.commit()
 
-# ─────────── Roulette ───────────
+# ═══════════════════════════════════════════════════════════
+#  ROULETTE
+# ═══════════════════════════════════════════════════════════
 def roulette_last(uid):
     return db().execute('SELECT spun_at FROM roulette_spins WHERE user_id=? ORDER BY id DESC LIMIT 1',(uid,)).fetchone()
 def roulette_can_spin(uid):
     last=roulette_last(uid)
-    if not last: return True, 0
+    if not last: return True,0
     try:
         delta=datetime.now()-datetime.fromisoformat(last['spun_at'])
         cd=timedelta(hours=ROULETTE_COOLDOWN_HOURS)
-        if delta>=cd: return True, 0
-        return False, int((cd-delta).total_seconds())
-    except: return True, 0
+        if delta>=cd: return True,0
+        return False,int((cd-delta).total_seconds())
+    except: return True,0
 def roulette_spin(uid):
     total=sum(w for _,w in ROULETTE_PRIZES)
     r=random.randint(1,total); acc=0; prize=0
@@ -312,44 +417,9 @@ def roulette_spin(uid):
     if prize>0: change_balance(uid,prize)
     return prize
 
-# ─────────── screens ───────────
-async def show_screen(q, context, uid, bkey, text, kb):
-    msg=q.message
-    file_id=get_banner(bkey) if bkey else None
-    use_photo=bool(file_id) and len(text)<=CAPTION_MAX
-    was_photo=bool(msg.photo)
-    if use_photo:
-        text=_strip_header(bkey,text)
-        try:
-            media=InputMediaPhoto(media=file_id,caption=text,parse_mode=ParseMode.HTML)
-            await msg.edit_media(media=media,reply_markup=kb); return
-        except Exception as e: log.warning('edit_media: %s',e)
-    if was_photo:
-        try: await msg.delete()
-        except: pass
-        try: await context.bot.send_message(msg.chat_id,text,parse_mode=ParseMode.HTML,reply_markup=kb)
-        except Exception as e: log.warning('send fb: %s',e)
-        return
-    try: await msg.edit_text(text,parse_mode=ParseMode.HTML,reply_markup=kb)
-    except Exception as e:
-        log.warning('edit_text: %s',e)
-        try: await msg.delete()
-        except: pass
-        try: await context.bot.send_message(msg.chat_id,text,parse_mode=ParseMode.HTML,reply_markup=kb)
-        except: pass
-
-async def send_screen(update, uid, bkey, text, kb):
-    file_id=get_banner(bkey) if bkey else None
-    use_photo=bool(file_id) and len(text)<=CAPTION_MAX
-    if use_photo: text=_strip_header(bkey,text)
-    chat=update.effective_chat
-    if use_photo:
-        try:
-            await chat.send_photo(file_id,caption=text,parse_mode=ParseMode.HTML,reply_markup=kb); return
-        except Exception as e: log.warning('send_photo: %s',e)
-    await chat.send_message(text,parse_mode=ParseMode.HTML,reply_markup=kb)
-
-# ─────────── rate limit ───────────
+# ═══════════════════════════════════════════════════════════
+#  RATE LIMIT
+# ═══════════════════════════════════════════════════════════
 _rate_log={}
 def check_rate(uid):
     limit=rate_limit_count(); window=rate_limit_window(); now=time.time()
@@ -358,7 +428,9 @@ def check_rate(uid):
         wait=int(window-(now-times[0]))+1; _rate_log[uid]=times; return False,wait
     times.append(now); _rate_log[uid]=times; return True,0
 
-# ─────────── admins ───────────
+# ═══════════════════════════════════════════════════════════
+#  ADMINS
+# ═══════════════════════════════════════════════════════════
 def is_admin(uid):
     if uid==ADMIN_ID: return True
     return bool(db().execute('SELECT 1 FROM admins WHERE user_id=?',(uid,)).fetchone())
@@ -371,7 +443,9 @@ def remove_admin(uid):
 def list_admins():
     return db().execute('SELECT user_id, added_by, added_at FROM admins ORDER BY added_at').fetchall()
 
-# ─────────── users ───────────
+# ═══════════════════════════════════════════════════════════
+#  USERS
+# ═══════════════════════════════════════════════════════════
 def ensure_user(u):
     c=db(); now=datetime.now().isoformat(timespec='seconds')
     r=c.execute('SELECT user_id FROM users WHERE user_id=?',(u.id,)).fetchone()
@@ -439,7 +513,9 @@ def gen_time_stats():
     r=db().execute('SELECT AVG(elapsed) AS a, MIN(elapsed) AS mn, MAX(elapsed) AS mx, COUNT(elapsed) AS c FROM history WHERE status="success" AND elapsed IS NOT NULL').fetchone()
     return (r['a'] or 0, r['mn'] or 0, r['mx'] or 0, r['c'] or 0)
 
-# ─────────── rub / refs ───────────
+# ═══════════════════════════════════════════════════════════
+#  RUB / REFS / PROMO
+# ═══════════════════════════════════════════════════════════
 def referrer_of(uid):
     r=db().execute('SELECT referred_by FROM users WHERE user_id=?',(uid,)).fetchone()
     return r['referred_by'] if r else None
@@ -492,8 +568,6 @@ def ref_stats(uid):
     return total,earned
 def ref_link(uid):
     return f'https://t.me/{BOT_USERNAME}?start=ref_{uid}'
-
-# ─────────── promo ───────────
 def create_promo(code,amount,uses,days=None,by=None):
     now=datetime.now()
     exp=(now+timedelta(days=days)).isoformat(timespec='seconds') if days else None
@@ -525,7 +599,9 @@ def delete_promo(code):
 def get_promo(code):
     return db().execute('SELECT * FROM promo_codes WHERE code=?',(code,)).fetchone()
 
-# ─────────── tickets ───────────
+# ═══════════════════════════════════════════════════════════
+#  TICKETS
+# ═══════════════════════════════════════════════════════════
 def create_ticket(uid,text=None,photo_id=None):
     now=datetime.now().isoformat(timespec='seconds'); c=db()
     tid=c.execute('INSERT INTO tickets(user_id,status,created_at,updated_at) VALUES(?,?,?,?)',(uid,'open',now,now)).lastrowid
@@ -551,7 +627,9 @@ def list_user_tickets(uid,limit=10):
 def list_open_tickets(limit=30):
     return db().execute('SELECT id,user_id,updated_at FROM tickets WHERE status="open" ORDER BY updated_at DESC LIMIT ?',(limit,)).fetchall()
 
-# ─────────── keyboards ───────────
+# ═══════════════════════════════════════════════════════════
+#  KEYBOARDS
+# ═══════════════════════════════════════════════════════════
 def t(uid,key,**kw):
     lang=get_lang(uid); s=TR.get(lang,TR['ru']).get(key) or TR['ru'].get(key) or key
     return s.format(**kw) if kw else s
@@ -573,22 +651,19 @@ def kb_menu(uid):
          InlineKeyboardButton(t(uid,'ref'),callback_data='ref')],
         [InlineKeyboardButton(t(uid,'support'),callback_data='support'),
          InlineKeyboardButton(t(uid,'help'),callback_data='help')],
-        [InlineKeyboardButton(t(uid,'lang'),callback_data='lang')],
-    ])
+        [InlineKeyboardButton(t(uid,'lang'),callback_data='lang')]])
 def kb_balance(uid):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(t(uid,'topup'),callback_data='topup'),
          InlineKeyboardButton(t(uid,'exchange_btn'),callback_data='exchange')],
-        [InlineKeyboardButton(t(uid,'back_menu'),callback_data='menu')],
-    ])
+        [InlineKeyboardButton(t(uid,'back_menu'),callback_data='menu')]])
 def kb_sizes(uid):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(t(uid,'size_1024'),callback_data='size:1024x1024')],
         [InlineKeyboardButton('🟧 1536×1024',callback_data='size:1536x1024'),
          InlineKeyboardButton('🟪 1024×1536',callback_data='size:1024x1536')],
         [InlineKeyboardButton(t(uid,'back'),callback_data='menu'),
-         InlineKeyboardButton(t(uid,'cancel'),callback_data='cancel')],
-    ])
+         InlineKeyboardButton(t(uid,'cancel'),callback_data='cancel')]])
 def kb_confirm(uid,tok):
     return InlineKeyboardMarkup([[
         InlineKeyboardButton(t(uid,'confirm_create'),callback_data='ok:'+tok),
@@ -661,9 +736,9 @@ def kb_admin_banners():
     kr.append([InlineKeyboardButton('◀️ Назад',callback_data='adm:main')])
     return InlineKeyboardMarkup(kr)
 def kb_banner_actions(key):
-    have=key in list_banners()
+    in_db=db_has_banner(key)
     rows=[[InlineKeyboardButton('📤 Загрузить/заменить',callback_data=f'adm:ban:upload:{key}')]]
-    if have: rows.append([InlineKeyboardButton('❌ Удалить',callback_data=f'adm:ban:del:{key}')])
+    if in_db: rows.append([InlineKeyboardButton('❌ Удалить из БД',callback_data=f'adm:ban:del:{key}')])
     rows.append([InlineKeyboardButton('◀️ Назад',callback_data='adm:banners')])
     return InlineKeyboardMarkup(rows)
 def kb_admin_api():
@@ -728,7 +803,9 @@ def kb_promo_list():
     kb.append([InlineKeyboardButton('◀️ Назад',callback_data='adm:promos')])
     return InlineKeyboardMarkup(kb)
 
-# ─────────── texts ───────────
+# ═══════════════════════════════════════════════════════════
+#  TEXTS
+# ═══════════════════════════════════════════════════════════
 def main_text(uid):
     return (f'{t(uid,"menu_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n'
         f'💵 {t(uid,"rubles")}: <b>{rub_balance(uid)} ₽</b>\n'
@@ -746,15 +823,15 @@ ADMIN_HELP=('🛠 <b>Админ-команды</b>\n━━━━━━━━━�
     '👑 <code>/setadmin ID</code> • <code>/unadmin ID</code> • <code>/admins</code>\n\n'
     '📢 <code>/broadcast ТЕКСТ</code> • <code>/ticket ID</code> • <code>/stats</code> • <code>/admin</code>')
 
-# ─────────── logging ───────────
+# ═══════════════════════════════════════════════════════════
+#  HELPERS / LOGGING
+# ═══════════════════════════════════════════════════════════
 async def alog(app,text,level=2):
     try: cur=int(setting('log_level','2'))
     except: cur=2
     if cur==0 or level>cur: return
     try: await app.bot.send_message(ADMIN_ID,text,parse_mode=ParseMode.HTML)
     except Exception as e: log.warning('alog: %s',e)
-
-# ─────────── helpers ───────────
 def fmt_timeout():
     t_=get_timeout()
     return f'{t_//60} мин' if t_%60==0 else f'{t_} сек'
@@ -770,7 +847,9 @@ def fmt_seconds_human(sec):
     if m<60: return f'{m} мин'
     h,m=divmod(m,60); return f'{h} ч {m} мин'
 
-# ─────────── api calls ───────────
+# ═══════════════════════════════════════════════════════════
+#  API CALLS
+# ═══════════════════════════════════════════════════════════
 async def moderate(prompt):
     for api in api_active('mod'):
         try:
@@ -814,7 +893,9 @@ async def send_image(app,chat_id,data):
     if msg and msg.photo: return msg.photo[-1].file_id
     return None
 
-# ─────────── queue ───────────
+# ═══════════════════════════════════════════════════════════
+#  QUEUE
+# ═══════════════════════════════════════════════════════════
 pending_jobs=[]; job_lock=asyncio.Lock(); workers=[]
 async def queue_position_updater(app):
     while True:
@@ -885,7 +966,9 @@ async def _keep_typing(app,chat,max_sec):
             await asyncio.sleep(4); el+=4
     except asyncio.CancelledError: return
 
-# ─────────── payment handlers ───────────
+# ═══════════════════════════════════════════════════════════
+#  PAYMENTS
+# ═══════════════════════════════════════════════════════════
 async def pre_checkout(update,context):
     q=update.pre_checkout_query
     try:
@@ -926,7 +1009,9 @@ async def on_successful_payment(update,context):
         except: pass
     await alog(context.application,f'⭐ <b>Stars</b>\n👤 <code>{u.id}</code> • ⭐ {stars} • 💵 {rub} ₽',level=2)
 
-# ─────────── user handlers ───────────
+# ═══════════════════════════════════════════════════════════
+#  USER HANDLERS
+# ═══════════════════════════════════════════════════════════
 async def cmd_start(update,context):
     u=update.effective_user; ensure_user(u)
     if context.args:
@@ -1240,7 +1325,7 @@ async def on_message(update,context):
         key=context.user_data.pop('admin_banner_upload')
         if not photo: await update.message.reply_text('❌ Пришли изображение.'); return
         set_banner(key,photo)
-        await update.message.reply_text(f'✅ Баннер <b>{BANNER_KEYS.get(key,key)}</b> сохранён.',
+        await update.message.reply_text(f'✅ Баннер <b>{BANNER_KEYS.get(key,key)}</b> сохранён в БД (перекрывает файл).',
             parse_mode=ParseMode.HTML,reply_markup=kb_banner_actions(key)); return
 
     if is_admin(uid) and context.user_data.get('admin_api_step'):
@@ -1303,6 +1388,16 @@ async def on_message(update,context):
         if key=='ref_percent' and (iv<0 or iv>100): await update.message.reply_text('❌ 0-100'); return
         set_setting(key,iv)
         await update.message.reply_text(f'✅ <b>{key}</b> = <code>{iv}</code>',parse_mode=ParseMode.HTML); return
+
+    if is_admin(uid) and context.user_data.get('admin_api_prio_id'):
+        aid=context.user_data.pop('admin_api_prio_id')
+        try: pr=int(text)
+        except ValueError: await update.message.reply_text('❌'); return
+        api_set_priority(aid,pr); r=api_get(aid)
+        if r:
+            await update.message.reply_text(f'✅ API #{aid}: priority={pr}',parse_mode=ParseMode.HTML,
+                reply_markup=kb_api_detail(aid))
+        return
 
     if is_admin(uid) and context.user_data.get('admin_setbal'):
         target=context.user_data.pop('admin_setbal')
@@ -1463,7 +1558,9 @@ async def on_message(update,context):
 
     await update.message.reply_text(t(uid,'menu_hint'),reply_markup=kb_menu(uid))
 
-# ─────────── admin panel ───────────
+# ═══════════════════════════════════════════════════════════
+#  ADMIN PANEL
+# ═══════════════════════════════════════════════════════════
 async def show_user_card(message,uid):
     u=get_user(uid)
     if not u: await message.reply_text('❌'); return
@@ -1564,25 +1661,25 @@ async def handle_admin_cb(q,context,d):
         await q.edit_message_text('\n'.join(lines),parse_mode=ParseMode.HTML,reply_markup=kb_admin()); return
 
     if d=='adm:banners':
-        await q.edit_message_text('🖼 <b>Баннеры экранов</b>\n━━━━━━━━━━━━━━━━━━━━\n\n✅ — загружен, ⬜ — нет.\nОткрой нужный и загрузи картинку.\n\n<i>Рекомендую 1280×640 или 1024×512.</i>',
+        await q.edit_message_text('🖼 <b>Баннеры экранов</b>\n━━━━━━━━━━━━━━━━━━━━\n\n✅ — загружен, ⬜ — нет.\n📁 — есть файл в репо, ✅ — загружен через бота.\n\n<i>Рекомендую 1280×640 или 1024×512.</i>',
             parse_mode=ParseMode.HTML,reply_markup=kb_admin_banners()); return
     if d.startswith('adm:ban:view:'):
-        key=d.split(':',3)[3]; name=BANNER_KEYS.get(key,key); have=key in list_banners()
-        await q.edit_message_text(f'🖼 <b>{name}</b>\n\n{"✅ загружен" if have else "⬜ не загружен"}',
+        key=d.split(':',3)[3]; name=BANNER_KEYS.get(key,key)
+        await q.edit_message_text(f'🖼 <b>{name}</b>\n\nИсточник: {banner_source(key)}',
             parse_mode=ParseMode.HTML,reply_markup=kb_banner_actions(key)); return
     if d.startswith('adm:ban:upload:'):
         key=d.split(':',3)[3]; context.user_data['admin_banner_upload']=key
         await q.edit_message_text(f'📤 Пришли картинку для баннера <b>{BANNER_KEYS.get(key,key)}</b>.\n\nРекомендую 1280×640 или 1024×512.',parse_mode=ParseMode.HTML); return
     if d.startswith('adm:ban:del:'):
         key=d.split(':',3)[3]; delete_banner(key)
-        await q.edit_message_text('❌ Баннер удалён.',parse_mode=ParseMode.HTML,reply_markup=kb_banner_actions(key)); return
+        await q.edit_message_text(f'❌ Баннер из БД удалён. {banner_source(key)}',
+            parse_mode=ParseMode.HTML,reply_markup=kb_banner_actions(key)); return
 
     if d=='adm:api':
         await q.edit_message_text('📡 <b>API-источники</b>\n━━━━━━━━━━━━━━━━━━━━\n\nВыбери тип.',
             parse_mode=ParseMode.HTML,reply_markup=kb_admin_api()); return
     if d.startswith('adm:api:list:'):
-        typ=d.split(':',3)[3]
-        rows=api_list(typ)
+        typ=d.split(':',3)[3]; rows=api_list(typ)
         title='🖼 API картинок' if typ=='image' else '🧠 API модераторов'
         if not rows:
             await q.edit_message_text(f'{title}\n\nПока пусто. Используется API из конфига.',
@@ -1667,7 +1764,9 @@ async def do_broadcast(app,update,text):
         await asyncio.sleep(0.05)
     await m.edit_text(f'✅ Доставлено: {ok}\nОшибок: {fail}')
 
-# ─────────── admin commands ───────────
+# ═══════════════════════════════════════════════════════════
+#  ADMIN COMMANDS
+# ═══════════════════════════════════════════════════════════
 async def cmd_admin(update,context):
     if not is_admin(update.effective_user.id): return
     await update.message.reply_text(admin_panel_text(),parse_mode=ParseMode.HTML,reply_markup=kb_admin())
@@ -1842,17 +1941,18 @@ async def cmd_setbanner(update,context):
     if not is_admin(uid): return
     if not context.args:
         keys_list='\n'.join(f'• <code>{k}</code> — {v}' for k,v in BANNER_KEYS.items())
-        await update.message.reply_text(f'🖼 <b>Баннеры</b>\n\nИспользование: <code>/setbanner KEY</code>\n\n<b>Ключи:</b>\n{keys_list}',parse_mode=ParseMode.HTML); return
+        await update.message.reply_text(f'🖼 <b>Баннеры</b>\n\nИспользование: <code>/setbanner KEY</code>\n\n<b>Ключи:</b>\n{keys_list}\n\n<i>Файлы по умолчанию: помести banners/KEY.png в репозиторий.</i>',parse_mode=ParseMode.HTML); return
     key=context.args[0].lower()
     if key not in BANNER_KEYS:
         await update.message.reply_text(f'❌ Ключ <code>{key}</code> не найден.',parse_mode=ParseMode.HTML); return
     context.user_data['admin_banner_upload']=key
-    await update.message.reply_text(f'📤 Пришли картинку для баннера <b>{BANNER_KEYS[key]}</b>.',parse_mode=ParseMode.HTML)
+    await update.message.reply_text(f'📤 Пришли картинку для баннера <b>{BANNER_KEYS[key]}</b>.\n<i>Сохраню в БД, перекрывая файл из репо.</i>',parse_mode=ParseMode.HTML)
 async def cmd_banners(update,context):
     if not is_admin(update.effective_user.id): return
-    have=list_banners()
     lines=['🖼 <b>Баннеры экранов</b>','━━━━━━━━━━━━━━━━━━━━','']
-    for k,n in BANNER_KEYS.items(): lines.append(f'{"✅" if k in have else "⬜"} <code>{k}</code> — {n}')
+    for k,n in BANNER_KEYS.items():
+        src=banner_source(k)
+        lines.append(f'<code>{k}</code> — {n}\n   {src}')
     lines.append(''); lines.append('<i>Управление: /admin → 🖼 Баннеры</i>')
     await update.message.reply_text('\n'.join(lines),parse_mode=ParseMode.HTML)
 async def cmd_delbanner(update,context):
@@ -1861,7 +1961,7 @@ async def cmd_delbanner(update,context):
     key=context.args[0].lower()
     if key not in BANNER_KEYS: await update.message.reply_text('❌ Неизвестный ключ.'); return
     delete_banner(key)
-    await update.message.reply_text(f'❌ Баннер <b>{BANNER_KEYS[key]}</b> удалён.',parse_mode=ParseMode.HTML)
+    await update.message.reply_text(f'❌ Баннер <b>{BANNER_KEYS[key]}</b> удалён из БД. Источник: {banner_source(key)}',parse_mode=ParseMode.HTML)
 async def cmd_apis(update,context):
     if not is_admin(update.effective_user.id): return
     rows=api_list()
@@ -1875,20 +1975,24 @@ async def cmd_apis(update,context):
         lines.append(f'   🎨 <code>{html.escape(r["model"])}</code>')
     await update.message.reply_text('\n'.join(lines),parse_mode=ParseMode.HTML)
 
-# ─────────── lifecycle ───────────
+# ═══════════════════════════════════════════════════════════
+#  LIFECYCLE
+# ═══════════════════════════════════════════════════════════
 async def post_init(app):
     init_db()
     n=int(setting('max_concurrent','1'))
     for _ in range(n): workers.append(asyncio.create_task(worker(app)))
     workers.append(asyncio.create_task(queue_position_updater(app)))
     banners_have=list_banners()
+    banners_files=sum(1 for k in BANNER_KEYS if banner_file(k))
+    banners_db=sum(1 for k in BANNER_KEYS if db_has_banner(k))
     apis_img=len(api_list('image')); apis_mod=len(api_list('mod'))
     await alog(app,
         f'🟢 <b>ImagesGPT запущен</b>\n👷 Воркеров: <code>{n}</code>\n'
         f'🎨 <code>{IMAGE_MODEL}</code>\n⏱ Таймаут: <code>{fmt_timeout()}</code>\n'
         f'📊 Курс: <code>1 🪙 = {coin_rate()} ₽</code>\n💸 Реф: <code>L1 {REF_L1}% • L2 {REF_L2}%</code>\n'
         f'⏳ Rate-limit: <code>{rate_limit_count()}/{rate_limit_window()}с</code>\n'
-        f'🖼 Баннеров: <code>{len(banners_have)}/{len(BANNER_KEYS)}</code>\n'
+        f'🖼 Баннеры: доступно <code>{len(banners_have)}/{len(BANNER_KEYS)}</code> (📁{banners_files} • ✅{banners_db})\n'
         f'📡 API: 🖼{apis_img} 🧠{apis_mod}',level=1)
 async def post_shutdown(app):
     for w in workers: w.cancel()
