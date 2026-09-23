@@ -1,5 +1,6 @@
 import asyncio, base64, html, logging, sqlite3, time, uuid, traceback, random, os
 from datetime import datetime, timedelta
+from urllib.parse import quote
 import httpx
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, LabeledPrice,
@@ -9,7 +10,7 @@ from telegram.constants import ParseMode, ChatAction
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     CallbackQueryHandler, ContextTypes, filters, PreCheckoutQueryHandler,
-    InlineQueryHandler
+    InlineQueryHandler, ChosenInlineResultHandler
 )
 
 # ═══════════════════════════════════════════════════════════
@@ -34,19 +35,15 @@ REF_L1 = 10
 REF_L2 = 5
 ROULETTE_MIN_DEPOSIT = 30
 ROULETTE_PRIZES = [(0,20),(1,35),(2,25),(3,12),(5,6),(10,2)]
-
-# 🎯 Инфлюенсеры
-ADV_DEFAULT_PERCENT = 20        # % по adv-ссылке
-
-# 🛡 Анти-абуз для новых юзеров
-NEW_USER_HOURS = 1              # аккаунт считается «новым» N часов после регистрации
-NEW_USER_LIMIT_COUNT = 1        # генераций
-NEW_USER_LIMIT_WINDOW = 300     # за 300 сек (5 мин)
-
-# 🌐 Webhook (на Railway само подхватится)
+ADV_DEFAULT_PERCENT = 20
+NEW_USER_HOURS = 1
+NEW_USER_LIMIT_COUNT = 1
+NEW_USER_LIMIT_WINDOW = 300
+REF_WITHDRAW_TO_BALANCE_MIN = 10
+REF_WITHDRAW_TO_CARD_MIN = 100
 PORT = int(os.environ.get('PORT', 8080))
 WEBHOOK_PATH = '/webhook'
-PUBLIC_DOMAIN = os.environ.get('RAILWAY_PUBLIC_DOMAIN')  # выставляется автоматически на Railway
+PUBLIC_DOMAIN = os.environ.get('RAILWAY_PUBLIC_DOMAIN')
 
 BANNERS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'banners')
 BANNER_KEYS = {
@@ -63,6 +60,7 @@ log = logging.getLogger('ImagesGPT')
 # ═══════════════════════════════════════════════════════════
 LANGS=('ru','en')
 LANGS_NAMES={'ru':'🇷🇺 Русский','en':'🇬🇧 English'}
+
 TR={
 'ru':{
 'menu_title':'🤖 <b>ImagesGPT</b>','balance':'💰 Баланс','topup':'💳 Пополнить','history':'📜 История',
@@ -79,8 +77,28 @@ TR={
 'history_not_found':'❌ Запись не найдена','history_failed':'❌ <i>Генерация не завершилась успешно</i>',
 'history_img_unavail':'⚠️ <i>Картинка недоступна</i>','ref_title':'👥 <b>Пригласить друга</b>',
 'ref_your_link':'🔗 Твоя ссылка:','ref_you_get':'💸 Ты получаешь <b>{percent}%</b> с пополнений друзей.',
-'ref_earn_rub':'💵 Заработанное начисляется в рублях.','ref_invited':'👤 Приглашено','ref_earned':'💵 Заработано',
-'ref_share':'📤 Поделиться','ref_note':'<i>Бонус начисляется автоматически при пополнении друга.</i>',
+'ref_earn_rub':'💵 Заработанное начисляется в реферальный баланс.',
+'ref_invited':'👤 Приглашено','ref_earned':'💵 Заработано','ref_share':'📤 Поделиться',
+'ref_note':'<i>Бонус начисляется автоматически при пополнении друга.</i>',
+'ref_balance':'Реферальный баланс','ref_withdraw':'💸 Вывести',
+'ref_withdraw_title':'💸 <b>Вывод реферальных</b>',
+'ref_withdraw_text':('🎁 Реферальный баланс: <b>{bal} ₽</b>\n\n'
+'💸 <b>На основной баланс</b> — от {min_bal} ₽, мгновенно.\n'
+'💳 <b>На карту</b> — от {min_card} ₽, заявка обрабатывается админом.\n\n'
+'История: /ref_history'),
+'ref_withdraw_to_balance':'💸 На баланс (от {min_bal} ₽)',
+'ref_withdraw_to_card':'💳 На карту (от {min_card} ₽)',
+'ref_withdraw_to_balance_ask':'💸 Введи сумму в ₽ для перевода на основной баланс.\nМинимум: <b>{min_bal} ₽</b>\nДоступно: <b>{bal} ₽</b>',
+'ref_withdraw_to_card_ask':'💳 Введи сумму в ₽ для вывода на карту.\nМинимум: <b>{min_card} ₽</b>\nДоступно: <b>{bal} ₽</b>',
+'ref_withdraw_card_number':'💳 Введи <b>номер карты</b> (16 цифр) или реквизиты.\n<i>Сумма: {amount} ₽</i>',
+'ref_withdraw_too_low':'❌ Минимум для вывода: <b>{min} ₽</b>. У тебя: <b>{bal} ₽</b>.',
+'ref_withdraw_not_enough':'❌ Недостаточно средств. У тебя <b>{bal} ₽</b>.',
+'ref_withdraw_balance_ok':('✅ <b>Переведено на баланс</b>\n\n💸 Списано с реферального: <b>{amount} ₽</b>\n'
+'💵 Основной баланс: <b>{bal} ₽</b>'),
+'ref_withdraw_card_ok':('✅ <b>Заявка на вывод создана</b>\n\n💳 Сумма: <b>{amount} ₽</b>\n'
+'🔢 Заявка: <b>#{wid}</b>\n\n<i>Админ обработает заявку в ближайшее время.</i>'),
+'ref_history_title':'📜 <b>История выводов</b>',
+'ref_history_empty':'📜 <i>Пока нет выводов.</i>',
 'promo_ask':'🎁 <b>Введи промокод:</b>','promo_ok':'🎉 Промокод активирован!',
 'promo_credited':'Начислено: <b>+{n}</b> монет','support_title':'🆘 <b>Поддержка</b>',
 'support_open_exists':'У тебя есть открытый тикет <b>#{tid}</b>.\nМожешь продолжить или создать новый.',
@@ -123,9 +141,9 @@ TR={
 'roulette_locked_no_dep':('🔒 <b>Рулетка пока недоступна</b>\n\n'
 'Пополни баланс минимум на <b>{min_dep} ₽</b> на этой неделе, '
 'и получишь шанс крутануть барабан.'),
-'roulette_already_this_week':('✅ Ты уже крутил рулетку на этой неделе.\n\n'
-'Следующая попытка — в понедельник.'),
+'roulette_already_this_week':('✅ Ты уже крутил рулетку на этой неделе.\n\nСледующая попытка — в понедельник.'),
 'new_user_limit':'🛡 Новый аккаунт — лимит {n} генерация за {m} минут. Попробуй позже.',
+'share_btn':'📤 Поделиться',
 },
 'en':{
 'menu_title':'🤖 <b>ImagesGPT</b>','balance':'💰 Balance','topup':'💳 Top up','history':'📜 History',
@@ -142,8 +160,28 @@ TR={
 'history_not_found':'❌ Not found','history_failed':'❌ <i>Generation failed</i>',
 'history_img_unavail':'⚠️ <i>Image unavailable</i>','ref_title':'👥 <b>Invite a friend</b>',
 'ref_your_link':'🔗 Your link:','ref_you_get':'💸 You get <b>{percent}%</b> of friend top-ups.',
-'ref_earn_rub':'💵 Earnings credited in rubles.','ref_invited':'👤 Invited','ref_earned':'💵 Earned',
-'ref_share':'📤 Share','ref_note':'<i>Bonus credited automatically on friend top-up.</i>',
+'ref_earn_rub':'💵 Earnings go to referral balance.',
+'ref_invited':'👤 Invited','ref_earned':'💵 Earned','ref_share':'📤 Share',
+'ref_note':'<i>Bonus credited automatically on friend top-up.</i>',
+'ref_balance':'Referral balance','ref_withdraw':'💸 Withdraw',
+'ref_withdraw_title':'💸 <b>Withdraw referral earnings</b>',
+'ref_withdraw_text':('🎁 Referral balance: <b>{bal} ₽</b>\n\n'
+'💸 <b>To main balance</b> — min {min_bal} ₽, instant.\n'
+'💳 <b>To card</b> — min {min_card} ₽, admin processes manually.\n\n'
+'History: /ref_history'),
+'ref_withdraw_to_balance':'💸 To balance (min {min_bal} ₽)',
+'ref_withdraw_to_card':'💳 To card (min {min_card} ₽)',
+'ref_withdraw_to_balance_ask':'💸 Enter amount in ₽ for transfer to main balance.\nMin: <b>{min_bal} ₽</b>\nAvailable: <b>{bal} ₽</b>',
+'ref_withdraw_to_card_ask':'💳 Enter amount in ₽ for card withdrawal.\nMin: <b>{min_card} ₽</b>\nAvailable: <b>{bal} ₽</b>',
+'ref_withdraw_card_number':'💳 Enter <b>card number</b> (16 digits) or details.\n<i>Amount: {amount} ₽</i>',
+'ref_withdraw_too_low':'❌ Minimum: <b>{min} ₽</b>. You have: <b>{bal} ₽</b>.',
+'ref_withdraw_not_enough':'❌ Not enough funds. You have <b>{bal} ₽</b>.',
+'ref_withdraw_balance_ok':('✅ <b>Transferred to balance</b>\n\n💸 From referral: <b>{amount} ₽</b>\n'
+'💵 Main balance: <b>{bal} ₽</b>'),
+'ref_withdraw_card_ok':('✅ <b>Withdrawal request created</b>\n\n💳 Amount: <b>{amount} ₽</b>\n'
+'🔢 Request: <b>#{wid}</b>\n\n<i>Admin will process it soon.</i>'),
+'ref_history_title':'📜 <b>Withdrawal history</b>',
+'ref_history_empty':'📜 <i>No withdrawals yet.</i>',
 'promo_ask':'🎁 <b>Enter promo code:</b>','promo_ok':'🎉 Promo activated!',
 'promo_credited':'Credited: <b>+{n}</b> coins','support_title':'🆘 <b>Support</b>',
 'support_open_exists':'You have an open ticket <b>#{tid}</b>.','support_desc':'Describe your issue — we will reply soon.',
@@ -182,9 +220,9 @@ TR={
 'roulette_empty':'💨 <b>Empty.</b> No luck today.','roulette_done':'✅ Come back next week!',
 'roulette_locked_no_dep':('🔒 <b>Roulette is locked</b>\n\n'
 'Top up at least <b>{min_dep} ₽</b> this week to unlock a spin.'),
-'roulette_already_this_week':('✅ You already spun the roulette this week.\n\n'
-'Next attempt — on Monday.'),
+'roulette_already_this_week':('✅ You already spun the roulette this week.\n\nNext attempt — on Monday.'),
 'new_user_limit':'🛡 New account — limit {n} generation per {m} min. Try later.',
+'share_btn':'📤 Share',
 },
 }
 
@@ -207,6 +245,7 @@ def init_db():
     c.executescript('''
         CREATE TABLE IF NOT EXISTS users(user_id INTEGER PRIMARY KEY, username TEXT, full_name TEXT,
             balance INTEGER NOT NULL DEFAULT 0, rub_balance INTEGER NOT NULL DEFAULT 0,
+            ref_balance INTEGER NOT NULL DEFAULT 0,
             created_at TEXT, last_seen TEXT, terms_accepted INTEGER NOT NULL DEFAULT 0,
             banned INTEGER NOT NULL DEFAULT 0, ban_reason TEXT, banned_at TEXT, banned_by INTEGER,
             referred_by INTEGER, ref_reward_given INTEGER NOT NULL DEFAULT 0, lang TEXT DEFAULT 'ru');
@@ -241,16 +280,22 @@ def init_db():
         CREATE TABLE IF NOT EXISTS adv_partners(user_id INTEGER PRIMARY KEY, code TEXT UNIQUE NOT NULL,
             percent INTEGER NOT NULL DEFAULT 20, created_at TEXT);
         CREATE TABLE IF NOT EXISTS inline_prompts(id TEXT PRIMARY KEY, user_id INTEGER, prompt TEXT, created_at TEXT);
+        CREATE TABLE IF NOT EXISTS ref_withdrawals(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
+            amount INTEGER NOT NULL, method TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+            card TEXT, created_at TEXT, processed_at TEXT, processed_by INTEGER, note TEXT);
     ''')
     for stmt in [
         'ALTER TABLE users ADD COLUMN banned INTEGER NOT NULL DEFAULT 0',
         'ALTER TABLE users ADD COLUMN ban_reason TEXT',
-        'ALTER TABLE users ADD COLUMN banned_at TEXT','ALTER TABLE users ADD COLUMN banned_by INTEGER',
+        'ALTER TABLE users ADD COLUMN banned_at TEXT',
+        'ALTER TABLE users ADD COLUMN banned_by INTEGER',
         'ALTER TABLE users ADD COLUMN referred_by INTEGER',
         'ALTER TABLE users ADD COLUMN ref_reward_given INTEGER NOT NULL DEFAULT 0',
         'ALTER TABLE users ADD COLUMN rub_balance INTEGER NOT NULL DEFAULT 0',
+        'ALTER TABLE users ADD COLUMN ref_balance INTEGER NOT NULL DEFAULT 0',
         'ALTER TABLE users ADD COLUMN lang TEXT DEFAULT "ru"',
-        'ALTER TABLE history ADD COLUMN file_id TEXT','ALTER TABLE history ADD COLUMN elapsed REAL',
+        'ALTER TABLE history ADD COLUMN file_id TEXT',
+        'ALTER TABLE history ADD COLUMN elapsed REAL',
         'ALTER TABLE ticket_messages ADD COLUMN photo_file_id TEXT',
         'CREATE INDEX IF NOT EXISTS idx_history_user ON history(user_id, id DESC)',
         'CREATE INDEX IF NOT EXISTS idx_topups_user_date ON topups(user_id, created_at)',
@@ -290,7 +335,7 @@ def rate_limit_window():
     except: return 60
 
 # ═══════════════════════════════════════════════════════════
-#  BANNERS (с кэшем file_id)
+#  BANNERS
 # ═══════════════════════════════════════════════════════════
 def banner_file(key):
     p=os.path.join(BANNERS_DIR,f'{key}.png')
@@ -308,7 +353,6 @@ def banner_cache_clear(key=None):
     if key: c.execute('DELETE FROM banners_cache WHERE key=?',(key,))
     else: c.execute('DELETE FROM banners_cache')
     c.commit()
-
 def get_banner(key):
     r=db().execute('SELECT file_id FROM banners WHERE key=?',(key,)).fetchone()
     if r: return ('id',r['file_id'])
@@ -338,7 +382,6 @@ def banner_source(key):
     if has_file: parts.append('📁 файл')
     if has_cache: parts.append('⚡ кэш')
     return ' + '.join(parts) if parts else '⬜ нет'
-
 def _strip_header(bkey,text):
     if not bkey: return text
     if not get_banner(bkey): return text
@@ -348,30 +391,29 @@ def _strip_header(bkey,text):
     return text
 
 async def upload_banner_files(app):
-    """Загружает файлы banners/*.png в Telegram, сохраняя file_id в кэш."""
     if not os.path.isdir(BANNERS_DIR): return
     for key in BANNER_KEYS:
         p=banner_file(key)
         if not p: continue
-        if db_has_banner(key): continue       # юзер перекрыл через админку
-        if banner_cache_get(key): continue    # уже в кэше
+        if db_has_banner(key): continue
+        if banner_cache_get(key): continue
         try:
             msg=await app.bot.send_photo(
                 chat_id=ADMIN_ID, photo=open(p,'rb'),
                 caption=f'⬆️ Кэш баннера: <b>{BANNER_KEYS[key]}</b> ({key})',
                 parse_mode=ParseMode.HTML)
             if msg.photo:
-                banner_cache_set(key, msg.photo[-1].file_id)
+                banner_cache_set(key,msg.photo[-1].file_id)
                 try: await msg.delete()
                 except: pass
-                log.info('Banner %s → cached', key)
+                log.info('Banner %s cached',key)
         except Exception as e:
-            log.warning('banner cache %s: %s', key, e)
+            log.warning('banner cache %s: %s',key,e)
 
 # ═══════════════════════════════════════════════════════════
 #  SCREENS
 # ═══════════════════════════════════════════════════════════
-async def show_screen(q, context, uid, bkey, text, kb):
+async def show_screen(q,context,uid,bkey,text,kb):
     msg=q.message
     banner=get_banner(bkey) if bkey else None
     use_photo=bool(banner) and len(text)<=CAPTION_MAX
@@ -415,7 +457,7 @@ async def show_screen(q, context, uid, bkey, text, kb):
                 await context.bot.send_message(msg.chat_id,text,parse_mode=ParseMode.HTML,reply_markup=kb)
         except: pass
 
-async def send_screen(update, uid, bkey, text, kb):
+async def send_screen(update,uid,bkey,text,kb):
     banner=get_banner(bkey) if bkey else None
     use_photo=bool(banner) and len(text)<=CAPTION_MAX
     if use_photo: text=_strip_header(bkey,text)
@@ -431,7 +473,7 @@ async def send_screen(update, uid, bkey, text, kb):
     await chat.send_message(text,parse_mode=ParseMode.HTML,reply_markup=kb)
 
 # ═══════════════════════════════════════════════════════════
-#  API
+#  API MANAGER
 # ═══════════════════════════════════════════════════════════
 def api_list(typ=None):
     if typ: return db().execute('SELECT * FROM apis WHERE type=? ORDER BY priority ASC, id ASC',(typ,)).fetchall()
@@ -510,7 +552,7 @@ def roulette_spin(uid):
     return prize
 
 # ═══════════════════════════════════════════════════════════
-#  RATE LIMIT + NEW USER LIMIT
+#  RATE LIMITS
 # ═══════════════════════════════════════════════════════════
 _rate_log={}
 def check_rate(uid):
@@ -528,9 +570,7 @@ def is_new_account(uid):
         created=datetime.fromisoformat(r['created_at'])
         return (datetime.now()-created) < timedelta(hours=NEW_USER_HOURS)
     except: return False
-
 def check_new_user_limit(uid):
-    """Для новых аккаунтов — жёсткий лимит на генерации. Возвращает (ok, wait)."""
     if not is_new_account(uid): return True,0
     now=time.time()
     times=[x for x in _new_user_log.get(uid,[]) if now-x<NEW_USER_LIMIT_WINDOW]
@@ -557,22 +597,20 @@ def list_admins():
     return db().execute('SELECT user_id, added_by, added_at FROM admins ORDER BY added_at').fetchall()
 
 # ═══════════════════════════════════════════════════════════
-#  ADV PARTNERS (инфлюенсеры)
+#  ADV PARTNERS
 # ═══════════════════════════════════════════════════════════
 def adv_get_by_uid(uid):
     return db().execute('SELECT * FROM adv_partners WHERE user_id=?',(uid,)).fetchone()
 def adv_get_by_code(code):
     return db().execute('SELECT * FROM adv_partners WHERE code=?',(code,)).fetchone()
-def adv_create(uid, code, percent=None):
-    pct = percent if percent is not None else ADV_DEFAULT_PERCENT
+def adv_create(uid,code,percent=None):
+    pct=percent if percent is not None else ADV_DEFAULT_PERCENT
     c=db()
     try:
         c.execute('INSERT INTO adv_partners(user_id,code,percent,created_at) VALUES(?,?,?,?)',
-            (uid, code, pct, datetime.now().isoformat(timespec='seconds')))
-        c.commit()
+            (uid,code,pct,datetime.now().isoformat(timespec='seconds'))); c.commit()
         return True
-    except sqlite3.IntegrityError:
-        return False
+    except sqlite3.IntegrityError: return False
 def adv_delete(code):
     c=db(); c.execute('DELETE FROM adv_partners WHERE code=?',(code,)); c.commit()
 def adv_list():
@@ -581,16 +619,14 @@ def adv_list():
 # ═══════════════════════════════════════════════════════════
 #  INLINE PROMPTS
 # ═══════════════════════════════════════════════════════════
-def inline_prompt_save(uid, prompt):
+def inline_prompt_save(uid,prompt):
     sid=uuid.uuid4().hex[:12]
     c=db(); c.execute('INSERT INTO inline_prompts(id,user_id,prompt,created_at) VALUES(?,?,?,?)',
-        (sid, uid, prompt, datetime.now().isoformat(timespec='seconds'))); c.commit()
+        (sid,uid,prompt,datetime.now().isoformat(timespec='seconds'))); c.commit()
     return sid
 def inline_prompt_get(sid):
-    r=db().execute('SELECT * FROM inline_prompts WHERE id=?',(sid,)).fetchone()
-    return r
+    return db().execute('SELECT * FROM inline_prompts WHERE id=?',(sid,)).fetchone()
 def inline_prompt_purge():
-    """Чистим старые inline-промпты (старше 1 часа)."""
     cutoff=(datetime.now()-timedelta(hours=1)).isoformat(timespec='seconds')
     c=db(); c.execute('DELETE FROM inline_prompts WHERE created_at<?',(cutoff,)); c.commit()
 
@@ -624,12 +660,19 @@ def balance(uid):
 def rub_balance(uid):
     r=db().execute('SELECT rub_balance FROM users WHERE user_id=?',(uid,)).fetchone()
     return r['rub_balance'] if r else 0
+def ref_balance(uid):
+    r=db().execute('SELECT ref_balance FROM users WHERE user_id=?',(uid,)).fetchone()
+    return r['ref_balance'] if r else 0
 def change_balance(uid,n):
     c=db(); c.execute('UPDATE users SET balance=balance+? WHERE user_id=?',(n,uid)); c.commit()
+def change_ref_balance(uid,n):
+    c=db(); c.execute('UPDATE users SET ref_balance=ref_balance+? WHERE user_id=?',(n,uid)); c.commit()
 def set_balance_exact(uid,n):
     c=db(); c.execute('UPDATE users SET balance=? WHERE user_id=?',(n,uid)); c.commit()
 def set_rub_exact(uid,n):
     c=db(); c.execute('UPDATE users SET rub_balance=? WHERE user_id=?',(n,uid)); c.commit()
+def set_ref_balance_exact(uid,n):
+    c=db(); c.execute('UPDATE users SET ref_balance=? WHERE user_id=?',(n,uid)); c.commit()
 def has_accepted(uid):
     r=db().execute('SELECT terms_accepted FROM users WHERE user_id=?',(uid,)).fetchone()
     return bool(r and r['terms_accepted'])
@@ -665,6 +708,27 @@ def gen_time_stats():
     return (r['a'] or 0, r['mn'] or 0, r['mx'] or 0, r['c'] or 0)
 
 # ═══════════════════════════════════════════════════════════
+#  REF WITHDRAWALS
+# ═══════════════════════════════════════════════════════════
+def ref_withdrawals_list(uid,limit=20):
+    return db().execute('SELECT * FROM ref_withdrawals WHERE user_id=? ORDER BY id DESC LIMIT ?',(uid,limit)).fetchall()
+def ref_withdrawal_create(uid,amount,method,card=None):
+    c=db()
+    cur=c.execute('INSERT INTO ref_withdrawals(user_id,amount,method,status,card,created_at) VALUES(?,?,?,?,?,?)',
+        (uid,amount,method,'pending',card,datetime.now().isoformat(timespec='seconds')))
+    c.commit()
+    return cur.lastrowid
+def ref_withdrawal_get(wid):
+    return db().execute('SELECT * FROM ref_withdrawals WHERE id=?',(wid,)).fetchone()
+def ref_withdrawal_set_status(wid,status,by=None,note=None):
+    c=db()
+    c.execute('UPDATE ref_withdrawals SET status=?, processed_at=?, processed_by=?, note=? WHERE id=?',
+        (status,datetime.now().isoformat(timespec='seconds'),by,note,wid))
+    c.commit()
+def ref_withdrawals_pending(limit=50):
+    return db().execute('SELECT * FROM ref_withdrawals WHERE status="pending" ORDER BY id DESC LIMIT ?',(limit,)).fetchall()
+
+# ═══════════════════════════════════════════════════════════
 #  RUB / REFS / PROMO
 # ═══════════════════════════════════════════════════════════
 def referrer_of(uid):
@@ -685,24 +749,22 @@ def topup_rub(uid,amount,method='manual',by_admin=None):
         cur=c.execute('INSERT INTO topups(user_id,amount,method,created_at,by_admin) VALUES(?,?,?,?,?)',
             (uid,amount,method,now,by_admin)); c.commit()
         tid=cur.lastrowid
-        # L1
         l1=referred_by_at_level(uid,1)
         if l1:
             adv=adv_get_by_uid(l1)
             pct=adv['percent'] if adv else REF_L1
             bonus=int(amount*pct/100)
             if bonus>0:
-                c.execute('UPDATE users SET rub_balance=rub_balance+? WHERE user_id=?',(bonus,l1))
+                c.execute('UPDATE users SET ref_balance=ref_balance+? WHERE user_id=?',(bonus,l1))
                 c.execute('INSERT INTO ref_earnings(referrer_id,referred_id,amount,source_topup_id,created_at) VALUES(?,?,?,?,?)',
                     (l1,uid,bonus,tid,now)); c.commit()
                 payouts.append((l1,1,bonus))
-            # L2 только если L1 не инфлюенсер
             if not adv:
                 l2=referred_by_at_level(uid,2)
                 if l2:
                     bonus2=int(amount*REF_L2/100)
                     if bonus2>0:
-                        c.execute('UPDATE users SET rub_balance=rub_balance+? WHERE user_id=?',(bonus2,l2))
+                        c.execute('UPDATE users SET ref_balance=ref_balance+? WHERE user_id=?',(bonus2,l2))
                         c.execute('INSERT INTO ref_earnings(referrer_id,referred_id,amount,source_topup_id,created_at) VALUES(?,?,?,?,?)',
                             (l2,uid,bonus2,tid,now)); c.commit()
                         payouts.append((l2,2,bonus2))
@@ -733,6 +795,9 @@ def ref_link(uid):
     return f'https://t.me/{BOT_USERNAME}?start=ref_{uid}'
 def adv_link(code):
     return f'https://t.me/{BOT_USERNAME}?start=adv_{code}'
+def share_bot_url():
+    text=quote(f'Зацени что я сделал в @{BOT_USERNAME}!')
+    return f'https://t.me/share/url?url=https://t.me/{BOT_USERNAME}&text={text}'
 def create_promo(code,amount,uses,days=None,by=None):
     now=datetime.now()
     exp=(now+timedelta(days=days)).isoformat(timespec='seconds') if days else None
@@ -793,7 +858,7 @@ def list_open_tickets(limit=30):
     return db().execute('SELECT id,user_id,updated_at FROM tickets WHERE status="open" ORDER BY updated_at DESC LIMIT ?',(limit,)).fetchall()
 
 # ═══════════════════════════════════════════════════════════
-#  I18N helper
+#  I18N HELPERS
 # ═══════════════════════════════════════════════════════════
 def t(uid,key,**kw):
     lang=get_lang(uid); s=TR.get(lang,TR['ru']).get(key) or TR['ru'].get(key) or key
@@ -823,7 +888,25 @@ def kb_menu(uid):
          InlineKeyboardButton(t(uid,'ref'),callback_data='ref')],
         [InlineKeyboardButton(t(uid,'support'),callback_data='support'),
          InlineKeyboardButton(t(uid,'help'),callback_data='help')],
-        [InlineKeyboardButton(t(uid,'lang'),callback_data='lang')]])
+        [InlineKeyboardButton('📤 '+t(uid,'share_btn').split(' ',1)[-1], url=share_bot_url())],
+        [InlineKeyboardButton(t(uid,'lang'),callback_data='lang')],
+    ])
+
+def kb_done(uid):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(t(uid,'share_btn'),url=share_bot_url())],
+        [InlineKeyboardButton(t(uid,'create_btn'),callback_data='create')],
+        [InlineKeyboardButton(t(uid,'balance'),callback_data='balance'),
+         InlineKeyboardButton(t(uid,'history'),callback_data='history')],
+        [InlineKeyboardButton(t(uid,'back_menu'),callback_data='menu')],
+    ])
+
+def kb_done_inline(uid):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(t(uid,'share_btn'),url=share_bot_url())],
+        [InlineKeyboardButton(t(uid,'create_btn'),url=f'https://t.me/{BOT_USERNAME}')],
+    ])
+
 def kb_balance(uid):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(t(uid,'topup'),callback_data='topup'),
@@ -885,13 +968,20 @@ def kb_ticket_admin(tid):
         InlineKeyboardButton('🔒 Закрыть',callback_data=f'ticket_close:{tid}')]])
 def kb_queue_cancel(uid,jid):
     return InlineKeyboardMarkup([[InlineKeyboardButton(t(uid,'queue_cancel'),callback_data=f'q:cancel:{jid}')]])
-def kb_roulette(uid, can_spin=True):
+def kb_roulette(uid,can_spin=True):
     rows=[]
     if can_spin:
         rows.append([InlineKeyboardButton(t(uid,'roulette_spin'),callback_data='roulette:spin')])
     rows.append([InlineKeyboardButton(t(uid,'topup'),callback_data='topup')])
     rows.append([InlineKeyboardButton(t(uid,'back_menu'),callback_data='menu')])
     return InlineKeyboardMarkup(rows)
+def kb_ref_withdraw(uid):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(t(uid,'ref_withdraw_to_balance',min_bal=REF_WITHDRAW_TO_BALANCE_MIN),callback_data='refw:bal')],
+        [InlineKeyboardButton(t(uid,'ref_withdraw_to_card',min_card=REF_WITHDRAW_TO_CARD_MIN),callback_data='refw:card')],
+        [InlineKeyboardButton('📜 История',callback_data='refw:history')],
+        [InlineKeyboardButton(t(uid,'back'),callback_data='ref')],
+    ])
 def kb_admin():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton('📊 Статистика',callback_data='adm:stats'),
@@ -902,13 +992,18 @@ def kb_admin():
          InlineKeyboardButton('🎁 Промокоды',callback_data='adm:promos')],
         [InlineKeyboardButton('🖼 Баннеры',callback_data='adm:banners'),
          InlineKeyboardButton('📡 API',callback_data='adm:api')],
-        [InlineKeyboardButton('🎯 Инфлюенсеры',callback_data='adm:adv')],
+        [InlineKeyboardButton('🎯 Инфлюенсеры',callback_data='adm:adv'),
+         InlineKeyboardButton('💸 Выводы',callback_data='adm:refw')],
         [InlineKeyboardButton('⚙️ Настройки',callback_data='adm:settings')],
         [InlineKeyboardButton('🔄 Обновить',callback_data='adm:main')]])
 def kb_admin_adv():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton('➕ Назначить',callback_data='adm:adv:new')],
         [InlineKeyboardButton('📋 Список',callback_data='adm:adv:list')],
+        [InlineKeyboardButton('◀️ Назад',callback_data='adm:main')]])
+def kb_admin_refw():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('📋 Ожидают',callback_data='adm:refw:pending')],
         [InlineKeyboardButton('◀️ Назад',callback_data='adm:main')]])
 def kb_admin_banners():
     have=list_banners(); kr=[]
@@ -1045,6 +1140,32 @@ async def moderate(prompt):
         except Exception as e:
             log.warning('moderate #%s: %s',api.get('id'),e); continue
     return False,'check_failed'
+
+async def translate_prompt(prompt):
+    """RU → EN для лучшего качества картинок. Если промпт и так на латинице, вернёт как есть."""
+    if not prompt: return prompt
+    cyr=sum(1 for c in prompt if '\u0400'<=c<='\u04FF')
+    if cyr < len(prompt)*0.2:
+        return prompt
+    sys_msg=('Translate the user prompt to English for an image generation model. '
+             'Preserve style, mood, details. Output ONLY the translation, '
+             'no explanations, no quotes, no prefixes.')
+    for api in api_active('mod'):
+        try:
+            payload={'model':api['model'],'messages':[
+                {'role':'system','content':sys_msg},
+                {'role':'user','content':prompt}],'temperature':0.2}
+            headers={'Authorization':'Bearer '+api['api_key'],'Content-Type':'application/json'}
+            async with httpx.AsyncClient(timeout=30) as c:
+                r=await c.post(api['base_url']+'/chat/completions',json=payload,headers=headers)
+                r.raise_for_status(); d=r.json()
+            out=d['choices'][0]['message']['content'].strip().strip('"').strip("'")
+            if out and 2<len(out)<len(prompt)*4:
+                return out
+        except Exception as e:
+            log.warning('translate #%s: %s',api.get('id'),e); continue
+    return prompt
+
 async def generate(prompt,size,timeout_sec):
     last=None
     for api in api_active('image'):
@@ -1057,6 +1178,7 @@ async def generate(prompt,size,timeout_sec):
         except Exception as e:
             log.warning('generate #%s: %s',api.get('id'),e); last=e; continue
     raise RuntimeError(f'All APIs failed. Last: {last}')
+
 async def send_image(app,chat_id,data):
     items=data.get('data') or []
     if not items: raise RuntimeError('No image')
@@ -1076,12 +1198,13 @@ async def send_image(app,chat_id,data):
 #  QUEUE
 # ═══════════════════════════════════════════════════════════
 pending_jobs=[]; job_lock=asyncio.Lock(); workers=[]
+
 async def queue_position_updater(app):
     while True:
         try:
             await asyncio.sleep(5)
             async with job_lock:
-                snap=[(i,j) for i,j in enumerate(pending_jobs) if not j.get('cancelled')]
+                snap=[(i,j) for i,j in enumerate(pending_jobs) if not j.get('cancelled') and not j.get('inline')]
             for pos0,j in snap:
                 pos=pos0+1
                 if j.get('last_pos')==pos or not j.get('msg_id'): continue
@@ -1094,6 +1217,7 @@ async def queue_position_updater(app):
                 except: pass
         except asyncio.CancelledError: return
         except Exception as e: log.warning('queue upd: %s',e)
+
 async def worker(app):
     while True:
         job=None
@@ -1101,41 +1225,115 @@ async def worker(app):
             for i,j in enumerate(pending_jobs):
                 if not j.get('cancelled'): job=pending_jobs.pop(i); break
         if job is None: await asyncio.sleep(0.5); continue
-        uid=job['uid']; chat=job['chat']; timeout_sec=get_timeout(); t0=time.time()
-        try:
-            await app.bot.send_chat_action(chat,ChatAction.UPLOAD_PHOTO)
+
+        uid=job['uid']
+        is_inline=job.get('inline',False)
+        chat=job.get('chat')
+        msg_id=job.get('msg_id')
+        inline_id=job.get('inline_message_id')
+        timeout_sec=get_timeout()
+        t0=time.time()
+
+        async def edit_safe(text):
             try:
-                await app.bot.edit_message_text(chat_id=chat,message_id=job['msg_id'],
-                    text=t(uid,'in_progress',limit=fmt_timeout()),parse_mode=ParseMode.HTML)
+                if is_inline:
+                    await app.bot.edit_message_text(
+                        inline_message_id=inline_id,text=text,parse_mode=ParseMode.HTML)
+                else:
+                    await app.bot.edit_message_text(
+                        chat_id=chat,message_id=msg_id,text=text,parse_mode=ParseMode.HTML)
             except: pass
-            await alog(app,f'🎨 <b>Генерация</b>\n👤 <code>{uid}</code>\n📐 <code>{html.escape(job["size"])}</code>\n📝 {html.escape(job["prompt"][:600])}',level=2)
-            tt=asyncio.create_task(_keep_typing(app,chat,timeout_sec))
-            try: data=await asyncio.wait_for(generate(job['prompt'],job['size'],timeout_sec),timeout_sec)
+
+        try:
+            if not is_inline:
+                await app.bot.send_chat_action(chat,ChatAction.UPLOAD_PHOTO)
+            await edit_safe(t(uid,'in_progress',limit=fmt_timeout()))
+            await alog(app,f'🎨 <b>Генерация</b>{" (inline)" if is_inline else ""}\n'
+                f'👤 <code>{uid}</code>\n📝 {html.escape(job["prompt"][:600])}',level=2)
+
+            typing_task=None
+            if not is_inline:
+                typing_task=asyncio.create_task(_keep_typing(app,chat,timeout_sec))
+
+            prompt_api=job.get('prompt_api') or job['prompt']
+            try:
+                data=await asyncio.wait_for(generate(prompt_api,job['size'],timeout_sec),timeout_sec)
             finally:
-                tt.cancel()
-                try: await tt
-                except: pass
+                if typing_task:
+                    typing_task.cancel()
+                    try: await typing_task
+                    except: pass
+
             el=time.time()-t0; els=fmt_duration(el)
-            fid=await send_image(app,chat,data)
+
+            items=data.get('data') or []
+            if not items: raise RuntimeError('No image')
+            item=items[0]
+            raw=None
+            if item.get('b64_json'):
+                raw=base64.b64decode(item['b64_json'])
+            elif item.get('url'):
+                async with httpx.AsyncClient(timeout=60) as c:
+                    r=await c.get(item['url']); r.raise_for_status(); raw=r.content
+            if not raw: raise RuntimeError('No image data')
+
+            fid=None
+            if is_inline:
+                try:
+                    await app.bot.edit_message_media(
+                        inline_message_id=inline_id,
+                        media=InputMediaPhoto(
+                            media=raw,
+                            caption=(f'{t(uid,"done_title")}\n'
+                                     f'{t(uid,"time_label")}: <b>{els}</b> • 🪙 {balance(uid)}'),
+                            parse_mode=ParseMode.HTML),
+                        reply_markup=kb_done_inline(uid))
+                except Exception as e:
+                    log.warning('edit inline media: %s',e)
+            else:
+                msg=await app.bot.send_photo(chat,raw,filename='imagesgpt.png')
+                if msg and msg.photo: fid=msg.photo[-1].file_id
+                await app.bot.send_message(chat,
+                    f'{t(uid,"done_title")}\n━━━━━━━━━━━━━━━━━━━━\n'
+                    f'{t(uid,"time_label")}: <b>{els}</b>\n'
+                    f'{t(uid,"left_coins")}: <b>{balance(uid)}</b> 🪙',
+                    parse_mode=ParseMode.HTML,reply_markup=kb_done(uid))
+
             add_history(uid,job['prompt'],job['size'],'success',fid,elapsed=el)
-            await app.bot.send_message(chat,
-                f'{t(uid,"done_title")}\n━━━━━━━━━━━━━━━━━━━━\n{t(uid,"time_label")}: <b>{els}</b>\n'
-                f'{t(uid,"left_coins")}: <b>{balance(uid)}</b> 🪙',
-                parse_mode=ParseMode.HTML,reply_markup=kb_menu(uid))
-            await alog(app,f'✅ <b>Готово</b> • 👤 <code>{uid}</code> • ⏱ <code>{els}</code> • 🪙 <code>{balance(uid)}</code>',level=2)
+            await alog(app,f'✅ <b>Готово</b>{" (inline)" if is_inline else ""} • '
+                f'👤 <code>{uid}</code> • ⏱ <code>{els}</code>',level=2)
+
         except asyncio.TimeoutError:
             el=time.time()-t0
             change_balance(uid,int(setting('image_cost','1')))
             add_history(uid,job['prompt'],job['size'],'timeout',elapsed=el)
-            await app.bot.send_message(chat,t(uid,'timeout',limit=fmt_timeout()),reply_markup=kb_menu(uid))
-            await alog(app,f'⏱ Timeout • 👤 <code>{uid}</code> • {fmt_duration(el)}',level=1)
+            if is_inline:
+                try:
+                    await app.bot.edit_message_text(
+                        inline_message_id=inline_id,
+                        text='⏱ Таймаут. Монета возвращена.',parse_mode=ParseMode.HTML)
+                except: pass
+            else:
+                await app.bot.send_message(chat,t(uid,'timeout',limit=fmt_timeout()),reply_markup=kb_menu(uid))
+            await alog(app,f'⏱ Timeout{" (inline)" if is_inline else ""} • 👤 <code>{uid}</code>',level=1)
+
         except Exception as e:
             el=time.time()-t0
             change_balance(uid,int(setting('image_cost','1')))
             add_history(uid,job['prompt'],job['size'],'error',elapsed=el)
-            await app.bot.send_message(chat,f'{t(uid,"error_gen")}\n\n<code>{html.escape(str(e)[:400])}</code>',
-                parse_mode=ParseMode.HTML,reply_markup=kb_menu(uid))
-            await alog(app,f'❌ <b>Ошибка</b> • 👤 <code>{uid}</code> • {fmt_duration(el)}\n<code>{html.escape(str(e)[:800])}</code>',level=1)
+            if is_inline:
+                try:
+                    await app.bot.edit_message_text(
+                        inline_message_id=inline_id,
+                        text='❌ Ошибка генерации. Монета возвращена.',parse_mode=ParseMode.HTML)
+                except: pass
+            else:
+                await app.bot.send_message(chat,
+                    f'{t(uid,"error_gen")}\n\n<code>{html.escape(str(e)[:400])}</code>',
+                    parse_mode=ParseMode.HTML,reply_markup=kb_menu(uid))
+            await alog(app,f'❌ <b>Ошибка</b>{" (inline)" if is_inline else ""} • '
+                f'👤 <code>{uid}</code>\n<code>{html.escape(str(e)[:800])}</code>',level=1)
+
 async def _keep_typing(app,chat,max_sec):
     el=0
     try:
@@ -1186,39 +1384,133 @@ async def on_successful_payment(update,context):
     await update.message.reply_text(msg,parse_mode=ParseMode.HTML,reply_markup=kb_menu(u.id))
     for ref,lvl,bonus in payouts:
         try:
-            await context.bot.send_message(ref,f'💸 <b>Реферальный бонус L{lvl}</b>\n\n+<b>{bonus} ₽</b>',parse_mode=ParseMode.HTML)
+            await context.bot.send_message(ref,f'💸 <b>Реферальный бонус L{lvl}</b>\n\n+<b>{bonus} ₽</b> (реф-баланс)',parse_mode=ParseMode.HTML)
         except: pass
     await alog(context.application,f'⭐ <b>Stars</b>\n👤 <code>{u.id}</code> • ⭐ {stars} • 💵 {rub} ₽',level=2)
 
 # ═══════════════════════════════════════════════════════════
-#  INLINE QUERY
+#  INLINE HANDLERS
 # ═══════════════════════════════════════════════════════════
 async def on_inline_query(update,context):
     q=update.inline_query
     query=(q.query or '').strip()
-    if not query or len(query)>500:
+    uid=q.from_user.id
+    ensure_user(q.from_user)
+
+    if not query or len(query)>400:
         results=[InlineQueryResultArticle(
             id='empty',
-            title='Напиши промпт после @бота',
+            title='🎨 Напиши промпт после @бота',
             description='Например: @ImagesGPT_bot кот в шляпе',
-            input_message_content=InputTextMessageContent('Пустой промпт'),
+            input_message_content=InputTextMessageContent(
+                f'Подсказка: напиши @{BOT_USERNAME} и промпт, например «кот в шляпе»'),
         )]
-        await q.answer(results,cache_time=0,is_personal=True)
-        return
-    sid=inline_prompt_save(q.from_user.id, query)
-    url=f'https://t.me/{BOT_USERNAME}?start=iq_{sid}'
+        await q.answer(results,cache_time=0,is_personal=True); return
+
+    cost=int(setting('image_cost','1'))
+    bal=balance(uid)
+    if bal<cost:
+        results=[InlineQueryResultArticle(
+            id='nocoins',
+            title='❌ Недостаточно монет',
+            description=f'Нужно {cost} 🪙 • у тебя {bal}',
+            input_message_content=InputTextMessageContent(
+                f'❌ Недостаточно монет для генерации.\nОткрой бота: https://t.me/{BOT_USERNAME}'),
+        )]
+        await q.answer(results,cache_time=0,is_personal=True); return
+
+    ok,wait=check_rate(uid)
+    if not ok:
+        results=[InlineQueryResultArticle(
+            id='ratelimit',
+            title='⏱ Слишком часто',
+            description=f'Подожди {wait} сек',
+            input_message_content=InputTextMessageContent(f'⏱ Подожди {wait} сек'),
+        )]
+        await q.answer(results,cache_time=0,is_personal=True); return
+
+    ok2,wait2=check_new_user_limit(uid)
+    if not ok2:
+        results=[InlineQueryResultArticle(
+            id='newuser',
+            title='🛡 Лимит нового аккаунта',
+            description=f'Попробуй через {wait2} сек',
+            input_message_content=InputTextMessageContent(f'🛡 Подожди {wait2} сек'),
+        )]
+        await q.answer(results,cache_time=0,is_personal=True); return
+
+    sid=inline_prompt_save(uid,query)
     results=[InlineQueryResultArticle(
         id=sid,
         title='🎨 Сгенерировать картинку',
         description=query[:120],
         input_message_content=InputTextMessageContent(
-            f'🎨 <b>Хочу сгенерировать:</b>\n{html.escape(query[:400])}',
+            f'🎨 <b>Генерация…</b>\n\n📝 {html.escape(query[:400])}\n\n<i>Обычно 30–90 секунд.</i>',
             parse_mode=ParseMode.HTML),
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton('🎨 Открыть бота', url=url)
-        ]]),
     )]
     await q.answer(results,cache_time=0,is_personal=True)
+
+async def on_chosen_inline(update,context):
+    r=update.chosen_inline_result
+    if not r: return
+    sid=r.result_id
+    inline_id=r.inline_message_id
+    uid=r.from_user.id
+
+    if not inline_id: return
+    if sid in ('empty','nocoins','ratelimit','newuser'): return
+
+    ensure_user_by_id(uid)
+    row=inline_prompt_get(sid)
+    if not row:
+        try:
+            await context.bot.edit_message_text(
+                inline_message_id=inline_id,
+                text='❌ Промпт устарел. Попробуй ещё раз.',
+                parse_mode=ParseMode.HTML)
+        except: pass
+        return
+
+    prompt=row['prompt']
+    cost=int(setting('image_cost','1'))
+    if balance(uid)<cost:
+        try:
+            await context.bot.edit_message_text(
+                inline_message_id=inline_id,
+                text='❌ Недостаточно монет.',parse_mode=ParseMode.HTML)
+        except: pass
+        return
+
+    ok,wait=check_rate(uid)
+    if not ok:
+        try:
+            await context.bot.edit_message_text(
+                inline_message_id=inline_id,
+                text=f'⏱ Подожди {wait} сек.',parse_mode=ParseMode.HTML)
+        except: pass
+        return
+
+    ok2,wait2=check_new_user_limit(uid)
+    if not ok2:
+        try:
+            await context.bot.edit_message_text(
+                inline_message_id=inline_id,
+                text=f'🛡 Лимит нового аккаунта. Через {wait2} сек.',
+                parse_mode=ParseMode.HTML)
+        except: pass
+        return
+
+    change_balance(uid,-cost)
+    prompt_api=await translate_prompt(prompt)
+
+    job_id=str(uuid.uuid4())
+    async with job_lock:
+        pending_jobs.append({
+            'job_id':job_id,'uid':uid,'chat':None,'msg_id':None,
+            'inline_message_id':inline_id,'inline':True,
+            'prompt':prompt,'prompt_api':prompt_api,'size':'1024x1024',
+            'last_pos':0,'cancelled':False,
+        })
 
 # ═══════════════════════════════════════════════════════════
 #  USER HANDLERS
@@ -1226,8 +1518,6 @@ async def on_inline_query(update,context):
 async def cmd_start(update,context):
     u=update.effective_user; ensure_user(u)
 
-    # параметры deep-link
-    prompt_from_inline=None
     if context.args:
         arg=context.args[0]
         if arg.startswith('ref_'):
@@ -1242,7 +1532,21 @@ async def cmd_start(update,context):
             sid=arg[3:]
             r=inline_prompt_get(sid)
             if r:
-                prompt_from_inline=r['prompt']
+                context.user_data['prompt']=r['prompt']
+                prompt_api=await translate_prompt(r['prompt'])
+                context.user_data['prompt_api']=prompt_api
+                cost=int(setting('image_cost','1'))
+                if balance(u.id)>=cost:
+                    hint=''
+                    if prompt_api!=r['prompt']:
+                        hint=f'\n\n🌐 <i>Переведено: {html.escape(prompt_api[:300])}</i>'
+                    await update.message.reply_text(
+                        f'🎨 <b>Промпт из inline:</b>\n\n📝 {html.escape(r["prompt"][:500])}{hint}\n\n📐 <b>Выбери размер:</b>',
+                        parse_mode=ParseMode.HTML, reply_markup=kb_sizes(u.id))
+                    return
+                else:
+                    await update.message.reply_text('❌ Недостаточно монет.',reply_markup=kb_menu(u.id))
+                    return
 
     if is_banned(u.id):
         r=get_user(u.id); reason=r['ban_reason'] or '—'
@@ -1254,25 +1558,25 @@ async def cmd_start(update,context):
             offer=OFFER_URL,offer_t=t(u.id,'terms_offer'),note=t(u.id,'terms_note'))
         await update.message.reply_text(terms,parse_mode=ParseMode.HTML,reply_markup=kb_terms(u.id),disable_web_page_preview=True)
         return
-
-    if prompt_from_inline:
-        context.user_data['prompt']=prompt_from_inline
-        cost=int(setting('image_cost','1'))
-        if balance(u.id)>=cost:
-            await update.message.reply_text(
-                f'🎨 <b>Промпт из inline-режима:</b>\n\n📝 {html.escape(prompt_from_inline[:500])}\n\n📐 <b>Выбери размер:</b>',
-                parse_mode=ParseMode.HTML,
-                reply_markup=kb_sizes(u.id))
-        else:
-            await update.message.reply_text('❌ Недостаточно монет.', reply_markup=kb_menu(u.id))
-        return
-
     await send_screen(update,u.id,'menu',main_text(u.id),kb_menu(u.id))
 
 async def cmd_help(update,context):
     uid=update.effective_user.id
     text=f'{t(uid,"help_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n'+t(uid,'help_text',percent=ref_percent(),min_dep=ROULETTE_MIN_DEPOSIT,bot=BOT_USERNAME)
     await send_screen(update,uid,'help',text,kb_menu(uid))
+
+async def cmd_ref_history(update,context):
+    u=update.effective_user; ensure_user(u); uid=u.id
+    rows=ref_withdrawals_list(uid)
+    if not rows:
+        await update.message.reply_text(t(uid,'ref_history_empty'),parse_mode=ParseMode.HTML,reply_markup=kb_menu(uid)); return
+    lines=[t(uid,'ref_history_title'),'━━━━━━━━━━━━━━━━━━━━','']
+    for r in rows:
+        status_map={'pending':'⏳','paid':'✅','declined':'❌'}
+        sm=status_map.get(r['status'],'?')
+        method='💸' if r['method']=='balance' else '💳'
+        lines.append(f'{sm} {method} #{r["id"]} • <b>{r["amount"]} ₽</b> • {r["created_at"]}')
+    await update.message.reply_text('\n'.join(lines),parse_mode=ParseMode.HTML,reply_markup=kb_menu(uid))
 
 async def on_callbacks(update,context):
     q=update.callback_query; await q.answer()
@@ -1356,6 +1660,7 @@ async def on_callbacks(update,context):
 
     if d=='balance':
         text=(f'{t(uid,"your_balance")}\n\n💵 {t(uid,"rubles")}: <b>{rub_balance(uid)} ₽</b>\n'
+              f'🎁 {t(uid,"ref_balance")}: <b>{ref_balance(uid)} ₽</b>\n'
               f'🪙 {t(uid,"coins")}: <b>{balance(uid)}</b>\n\n'
               f'📊 {t(uid,"rate")}: <b>1 🪙 = {coin_rate()} ₽</b>')
         await show_screen(q,context,uid,'balance',text,kb_balance(uid)); return
@@ -1424,18 +1729,61 @@ async def on_callbacks(update,context):
         adv=adv_get_by_uid(uid)
         extra=''
         if adv:
-            extra=(f'\n\n🎯 <b>Инфлюенсер-ссылка</b>\n'
-                   f'<code>{adv_link(adv["code"])}</code>\n'
+            extra=(f'\n\n🎯 <b>Инфлюенсер-ссылка</b>\n<code>{adv_link(adv["code"])}</code>\n'
                    f'Процент: <b>{adv["percent"]}%</b>')
+        rb=ref_balance(uid)
         text=(f'{t(uid,"ref_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n'
               f'{t(uid,"ref_your_link")}\n<code>{ref_link(uid)}</code>\n\n'
               f'{t(uid,"ref_you_get",percent=percent)}\nL1 {REF_L1}% • L2 {REF_L2}%\n'
               f'{t(uid,"ref_earn_rub")}\n\n{t(uid,"ref_invited")}: <b>{total}</b>\n'
-              f'{t(uid,"ref_earned")}: <b>{earned} ₽</b>\n\n{t(uid,"ref_note")}{extra}')
+              f'🎁 <b>{t(uid,"ref_balance")}: {rb} ₽</b>\n\n'
+              f'{t(uid,"ref_note")}{extra}')
         kb=InlineKeyboardMarkup([
             [InlineKeyboardButton(t(uid,'ref_share'),url=f'https://t.me/share/url?url={ref_link(uid)}&text=ImagesGPT')],
+            [InlineKeyboardButton(t(uid,'ref_withdraw'),callback_data='refw')],
             [InlineKeyboardButton(t(uid,'back_menu'),callback_data='menu')]])
         await show_screen(q,context,uid,'ref',text,kb); return
+
+    # ── Выводы реферальных ──
+    if d=='refw':
+        rb=ref_balance(uid)
+        text=(f'{t(uid,"ref_withdraw_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n'
+              +t(uid,'ref_withdraw_text',bal=rb,
+                 min_bal=REF_WITHDRAW_TO_BALANCE_MIN,min_card=REF_WITHDRAW_TO_CARD_MIN))
+        await show_screen(q,context,uid,None,text,kb_ref_withdraw(uid)); return
+
+    if d=='refw:history':
+        rows=ref_withdrawals_list(uid)
+        if not rows:
+            await show_screen(q,context,uid,None,t(uid,'ref_history_empty'),
+                InlineKeyboardMarkup([[InlineKeyboardButton(t(uid,'back'),callback_data='refw')]])); return
+        lines=[t(uid,'ref_history_title'),'━━━━━━━━━━━━━━━━━━━━','']
+        for r in rows:
+            status_map={'pending':'⏳ ожидает','paid':'✅ выплачено','declined':'❌ отклонено'}
+            sm=status_map.get(r['status'],r['status'])
+            method='💸 баланс' if r['method']=='balance' else '💳 карта'
+            lines.append(f'#{r["id"]} • {method} • <b>{r["amount"]} ₽</b>')
+            lines.append(f'   {sm} • {r["created_at"]}')
+        await show_screen(q,context,uid,None,'\n'.join(lines),
+            InlineKeyboardMarkup([[InlineKeyboardButton(t(uid,'back'),callback_data='refw')]])); return
+
+    if d=='refw:bal':
+        rb=ref_balance(uid)
+        if rb<REF_WITHDRAW_TO_BALANCE_MIN:
+            await q.answer(t(uid,'ref_withdraw_too_low',min=REF_WITHDRAW_TO_BALANCE_MIN,bal=rb),show_alert=True); return
+        context.user_data['waiting']='refw_bal'
+        text=t(uid,'ref_withdraw_to_balance_ask',min_bal=REF_WITHDRAW_TO_BALANCE_MIN,bal=rb)
+        await show_screen(q,context,uid,None,text,
+            InlineKeyboardMarkup([[InlineKeyboardButton(t(uid,'cancel'),callback_data='refw')]])); return
+
+    if d=='refw:card':
+        rb=ref_balance(uid)
+        if rb<REF_WITHDRAW_TO_CARD_MIN:
+            await q.answer(t(uid,'ref_withdraw_too_low',min=REF_WITHDRAW_TO_CARD_MIN,bal=rb),show_alert=True); return
+        context.user_data['waiting']='refw_card_amount'
+        text=t(uid,'ref_withdraw_to_card_ask',min_card=REF_WITHDRAW_TO_CARD_MIN,bal=rb)
+        await show_screen(q,context,uid,None,text,
+            InlineKeyboardMarkup([[InlineKeyboardButton(t(uid,'cancel'),callback_data='refw')]])); return
 
     if d=='promo':
         context.user_data['waiting']='promo'
@@ -1506,11 +1854,9 @@ async def on_callbacks(update,context):
         return
 
     if d=='create':
-        # rate limit
         ok,wait=check_rate(uid)
         if not ok:
             await show_screen(q,context,uid,'menu',t(uid,'rate_limit',sec=wait),kb_menu(uid)); return
-        # new user limit
         ok2,wait2=check_new_user_limit(uid)
         if not ok2:
             await show_screen(q,context,uid,'menu',
@@ -1533,7 +1879,8 @@ async def on_callbacks(update,context):
         p=context.user_data.get('prompt')
         if not p:
             await show_screen(q,context,uid,'menu','❌',kb_menu(uid)); return
-        tok=str(uuid.uuid4()); context.user_data['pending']={tok:(p,d.split(':',1)[1])}
+        p_api=context.user_data.get('prompt_api',p)
+        tok=str(uuid.uuid4()); context.user_data['pending']={tok:(p,p_api,d.split(':',1)[1])}
         cost=int(setting('image_cost','1'))
         text=(f'{t(uid,"confirm_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n📝 {html.escape(p[:500])}\n\n'
               f'📐 {d.split(":",1)[1]}\n💰 {cost} 🪙\n\n')
@@ -1546,10 +1893,11 @@ async def on_callbacks(update,context):
         if balance(uid)<cost:
             await show_screen(q,context,uid,'menu',t(uid,'insufficient_coins'),kb_menu(uid)); return
         change_balance(uid,-cost)
-        p,size=item; jid=str(uuid.uuid4())
+        p,p_api,size=item; jid=str(uuid.uuid4())
         async with job_lock:
             pos=len([j for j in pending_jobs if not j.get('cancelled')])+1
-            pending_jobs.append({'job_id':jid,'uid':uid,'chat':q.message.chat_id,'prompt':p,'size':size,
+            pending_jobs.append({'job_id':jid,'uid':uid,'chat':q.message.chat_id,
+                'prompt':p,'prompt_api':p_api,'size':size,
                 'msg_id':q.message.message_id,'last_pos':pos,'cancelled':False})
         text=(f'{t(uid,"queue_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n📐 {size}\n📝 {html.escape(p[:120])}\n\n'
               f'{t(uid,"queue_pos")}: <b>{pos}</b>')
@@ -1589,10 +1937,9 @@ async def on_message(update,context):
         key=context.user_data.pop('admin_banner_upload')
         if not photo: await update.message.reply_text('❌ Пришли изображение.'); return
         set_banner(key,photo)
-        await update.message.reply_text(f'✅ Баннер <b>{BANNER_KEYS.get(key,key)}</b> сохранён в БД (перекрывает файл).',
+        await update.message.reply_text(f'✅ Баннер <b>{BANNER_KEYS.get(key,key)}</b> сохранён в БД.',
             parse_mode=ParseMode.HTML,reply_markup=kb_banner_actions(key)); return
 
-    # admin: adv wizard
     if is_admin(uid) and context.user_data.get('admin_adv_step'):
         step=context.user_data['admin_adv_step']
         data=context.user_data.get('admin_adv_data',{})
@@ -1623,10 +1970,8 @@ async def on_message(update,context):
             uid_target=data['uid']; code=data['code']
             if adv_create(uid_target,code,pct):
                 await update.message.reply_text(
-                    f'✅ Инфлюенсер назначен\n\n'
-                    f'👤 <code>{uid_target}</code>\n'
-                    f'🎯 Код: <code>{code}</code>\n'
-                    f'💸 Процент: <b>{pct}%</b>\n'
+                    f'✅ Инфлюенсер назначен\n\n👤 <code>{uid_target}</code>\n'
+                    f'🎯 Код: <code>{code}</code>\n💸 Процент: <b>{pct}%</b>\n'
                     f'🔗 Ссылка: <code>{adv_link(code)}</code>',
                     parse_mode=ParseMode.HTML,reply_markup=kb_admin_adv())
             else:
@@ -1666,8 +2011,8 @@ async def on_message(update,context):
             aid=api_add(typ,data['name'],data['url'],data['key'],data['model'],pr)
             context.user_data.pop('admin_api_step',None); context.user_data.pop('admin_api_data',None); context.user_data.pop('admin_api_type',None)
             await update.message.reply_text(
-                f'✅ API <b>#{aid}</b> добавлен ({typ})\n\n📛 {html.escape(data["name"])}\n🌐 <code>{html.escape(data["url"])}</code>\n'
-                f'🎨 {html.escape(data["model"])}\n🔢 priority: {pr}',
+                f'✅ API <b>#{aid}</b> добавлен ({typ})\n\n📛 {html.escape(data["name"])}\n'
+                f'🌐 <code>{html.escape(data["url"])}</code>\n🎨 {html.escape(data["model"])}\n🔢 priority: {pr}',
                 parse_mode=ParseMode.HTML,reply_markup=kb_api_list(typ)); return
 
     if is_admin(uid) and context.user_data.get('admin_reply_ticket'):
@@ -1738,8 +2083,8 @@ async def on_message(update,context):
         payouts=topup_rub(target,amount,method='manual',by_admin=uid)
         msg=f'✅ <code>{target}</code> +{amount} ₽ → {rub_balance(target)} ₽'
         for ref,lvl,bonus in payouts:
-            msg+=f'\n💸 L{lvl} +{bonus} ₽ → <code>{ref}</code>'
-            try: await context.bot.send_message(ref,f'💸 L{lvl} +<b>{bonus} ₽</b>',parse_mode=ParseMode.HTML)
+            msg+=f'\n💸 L{lvl} +{bonus} ₽ → <code>{ref}</code> (реф-баланс)'
+            try: await context.bot.send_message(ref,f'💸 L{lvl} +<b>{bonus} ₽</b> (реф-баланс)',parse_mode=ParseMode.HTML)
             except: pass
         await update.message.reply_text(msg,parse_mode=ParseMode.HTML)
         try:
@@ -1800,6 +2145,78 @@ async def on_message(update,context):
 
     waiting=context.user_data.get('waiting')
 
+    # ── Выводы реф-баланса ──
+    if waiting=='refw_bal':
+        context.user_data.pop('waiting',None)
+        try: amount=int(text)
+        except ValueError:
+            await update.message.reply_text('❌ Число.',reply_markup=kb_menu(uid)); return
+        if amount<REF_WITHDRAW_TO_BALANCE_MIN:
+            await update.message.reply_text(
+                t(uid,'ref_withdraw_too_low',min=REF_WITHDRAW_TO_BALANCE_MIN,bal=ref_balance(uid)),
+                reply_markup=kb_menu(uid)); return
+        rb=ref_balance(uid)
+        if amount>rb:
+            await update.message.reply_text(
+                t(uid,'ref_withdraw_not_enough',bal=rb),reply_markup=kb_menu(uid)); return
+        change_ref_balance(uid,-amount)
+        c=db(); c.execute('UPDATE users SET rub_balance=rub_balance+? WHERE user_id=?',(amount,uid)); c.commit()
+        wid=ref_withdrawal_create(uid,amount,'balance')
+        ref_withdrawal_set_status(wid,'paid',by=0,note='auto')
+        await update.message.reply_text(
+            t(uid,'ref_withdraw_balance_ok',amount=amount,bal=rub_balance(uid)),
+            parse_mode=ParseMode.HTML,reply_markup=kb_menu(uid))
+        await alog(context.application,f'💸 <b>Реф → баланс</b>\n👤 <code>{uid}</code> • {amount} ₽',level=2)
+        return
+
+    if waiting=='refw_card_amount':
+        context.user_data.pop('waiting',None)
+        try: amount=int(text)
+        except ValueError:
+            await update.message.reply_text('❌ Число.',reply_markup=kb_menu(uid)); return
+        if amount<REF_WITHDRAW_TO_CARD_MIN:
+            await update.message.reply_text(
+                t(uid,'ref_withdraw_too_low',min=REF_WITHDRAW_TO_CARD_MIN,bal=ref_balance(uid)),
+                reply_markup=kb_menu(uid)); return
+        rb=ref_balance(uid)
+        if amount>rb:
+            await update.message.reply_text(
+                t(uid,'ref_withdraw_not_enough',bal=rb),reply_markup=kb_menu(uid)); return
+        context.user_data['refw_card_amount']=amount
+        context.user_data['waiting']='refw_card_number'
+        await update.message.reply_text(
+            t(uid,'ref_withdraw_card_number',amount=amount),parse_mode=ParseMode.HTML); return
+
+    if waiting=='refw_card_number':
+        context.user_data.pop('waiting',None)
+        amount=context.user_data.pop('refw_card_amount',0)
+        if not amount:
+            await update.message.reply_text('❌ Ошибка суммы.',reply_markup=kb_menu(uid)); return
+        card=text.replace(' ','')
+        if len(card)<10:
+            await update.message.reply_text('❌ Слишком короткий номер карты.',reply_markup=kb_menu(uid)); return
+        rb=ref_balance(uid)
+        if amount>rb:
+            await update.message.reply_text(
+                t(uid,'ref_withdraw_not_enough',bal=rb),reply_markup=kb_menu(uid)); return
+        change_ref_balance(uid,-amount)
+        wid=ref_withdrawal_create(uid,amount,'card',card=card)
+        await update.message.reply_text(
+            t(uid,'ref_withdraw_card_ok',amount=amount,wid=wid),
+            parse_mode=ParseMode.HTML,reply_markup=kb_menu(uid))
+        try:
+            await context.bot.send_message(ADMIN_ID,
+                f'💳 <b>Заявка на вывод #{wid}</b>\n\n'
+                f'👤 <code>{uid}</code>\n💰 <b>{amount} ₽</b>\n'
+                f'💳 Карта: <code>{html.escape(card)}</code>',
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton('✅ Выплачено',callback_data=f'adm:refw:paid:{wid}'),
+                    InlineKeyboardButton('❌ Отклонить',callback_data=f'adm:refw:decline:{wid}'),
+                ]]))
+        except: pass
+        return
+
     if waiting=='exchange_rub':
         context.user_data.pop('waiting',None)
         try: rub=int(text)
@@ -1847,8 +2264,15 @@ async def on_message(update,context):
         except Exception as e:
             await m.edit_text('❌'); await alog(context.application,f'⚠️ Moderation error\n<code>{html.escape(str(e)[:800])}</code>',level=1); return
         if not ok: await m.edit_text(f'{t(uid,"blocked")}\n\n{html.escape(reason)}',parse_mode=ParseMode.HTML,reply_markup=kb_menu(uid)); return
-        context.user_data['prompt']=text
-        await m.edit_text(t(uid,'choose_size'),parse_mode=ParseMode.HTML,reply_markup=kb_sizes(uid)); return
+
+        original=text
+        translated=await translate_prompt(text)
+        context.user_data['prompt']=original
+        context.user_data['prompt_api']=translated
+        hint=''
+        if translated!=original:
+            hint=f'\n\n🌐 <i>Переведено: {html.escape(translated[:300])}</i>'
+        await m.edit_text(t(uid,'choose_size')+hint,parse_mode=ParseMode.HTML,reply_markup=kb_sizes(uid)); return
 
     tid=get_open_ticket(uid)
     if tid:
@@ -1879,7 +2303,9 @@ async def show_user_card(message,uid):
     txt=(f'👤 <b>Пользователь</b>\n━━━━━━━━━━━━━━━━━━━━\n'
         f'🆔 <code>{u["user_id"]}</code>\n📛 {html.escape(u["full_name"] or "—")}\n'
         f'🔗 @{u["username"] or "—"}\n🌐 {u["lang"] or "ru"}\n'
-        f'💵 Рубли: <b>{u["rub_balance"]} ₽</b>\n🪙 Монеты: <b>{u["balance"]}</b>\n'
+        f'💵 Рубли: <b>{u["rub_balance"]} ₽</b>\n'
+        f'🎁 Реф-баланс: <b>{u["ref_balance"]} ₽</b>\n'
+        f'🪙 Монеты: <b>{u["balance"]}</b>\n'
         f'👑 Админ: {is_adm}\n📅 Регистрация: {u["created_at"]}\n👀 Последний визит: {u["last_seen"]}\n'
         f'👥 Пригласил: {total} • заработал: {earned} ₽\n'
         f'🎰 Рулетка ({st["week_key"]}): <b>{rl}</b> • деп: {st["deposit"]} ₽'
@@ -1962,7 +2388,7 @@ async def handle_admin_cb(q,context,d):
         tail=d.split(':',2)[2]
         if not tail.isdigit(): await q.edit_message_text('❌'); return
         uid=int(tail); context.user_data['admin_addrub']=uid
-        await q.edit_message_text(f'💵 Сумма ₽ <code>{uid}</code> (сейчас {rub_balance(uid)} ₽):\n<i>L1 {REF_L1}% • L2 {REF_L2}% реферерам.</i>',parse_mode=ParseMode.HTML); return
+        await q.edit_message_text(f'💵 Сумма ₽ <code>{uid}</code> (сейчас {rub_balance(uid)} ₽):\n<i>L1 {REF_L1}% • L2 {REF_L2}% → в реф-баланс</i>',parse_mode=ParseMode.HTML); return
     if d=='adm:broadcast':
         context.user_data['admin_broadcast']=True
         await q.edit_message_text('📢 Текст для рассылки.'); return
@@ -1975,11 +2401,10 @@ async def handle_admin_cb(q,context,d):
             lines.append(f'   ⏰ {r["banned_at"]}\n   💬 {html.escape(r["ban_reason"] or "—")}')
         await q.edit_message_text('\n'.join(lines),parse_mode=ParseMode.HTML,reply_markup=kb_admin()); return
 
-    # ── adv partners ──
+    # ── adv ──
     if d=='adm:adv':
         await q.edit_message_text('🎯 <b>Инфлюенсеры</b>\n━━━━━━━━━━━━━━━━━━━━\n\n'
-            f'Всего: <b>{len(adv_list())}</b>\n'
-            f'Дефолтный процент: <b>{ADV_DEFAULT_PERCENT}%</b>',
+            f'Всего: <b>{len(adv_list())}</b>\nДефолтный процент: <b>{ADV_DEFAULT_PERCENT}%</b>',
             parse_mode=ParseMode.HTML,reply_markup=kb_admin_adv()); return
     if d=='adm:adv:new':
         context.user_data['admin_adv_step']='uid'
@@ -2007,6 +2432,66 @@ async def handle_admin_cb(q,context,d):
         adv_delete(code)
         await q.edit_message_text(f'✅ Инфлюенсер <code>{code}</code> удалён.',
             parse_mode=ParseMode.HTML,reply_markup=kb_admin_adv()); return
+
+    # ── refw ──
+    if d=='adm:refw':
+        await q.edit_message_text('💸 <b>Выводы реферальных</b>\n━━━━━━━━━━━━━━━━━━━━\n\nЗаявки на вывод на карту.',
+            parse_mode=ParseMode.HTML,reply_markup=kb_admin_refw()); return
+    if d=='adm:refw:pending':
+        rows=ref_withdrawals_pending()
+        if not rows:
+            await q.edit_message_text('📋 Нет ожидающих заявок.',reply_markup=kb_admin_refw()); return
+        lines=['💸 <b>Ожидают выплаты</b>','━━━━━━━━━━━━━━━━━━━━','']
+        kb=[]
+        for r in rows:
+            lines.append(f'<b>#{r["id"]}</b> • 👤 <code>{r["user_id"]}</code> • {r["amount"]} ₽')
+            lines.append(f'   💳 <code>{html.escape(r["card"] or "—")}</code>')
+            kb.append([InlineKeyboardButton(f'#{r["id"]} • {r["amount"]} ₽',
+                callback_data=f'adm:refw:view:{r["id"]}')])
+        kb.append([InlineKeyboardButton('◀️ Назад',callback_data='adm:refw')])
+        await q.edit_message_text('\n'.join(lines),parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(kb)); return
+    if d.startswith('adm:refw:view:'):
+        wid=int(d.split(':',3)[3]); r=ref_withdrawal_get(wid)
+        if not r: await q.edit_message_text('❌'); return
+        text=(f'💸 <b>Заявка #{wid}</b>\n━━━━━━━━━━━━━━━━━━━━\n\n'
+              f'👤 <code>{r["user_id"]}</code>\n💰 Сумма: <b>{r["amount"]} ₽</b>\n'
+              f'💳 Карта: <code>{html.escape(r["card"] or "—")}</code>\n'
+              f'📅 Создана: {r["created_at"]}\n📊 Статус: <b>{r["status"]}</b>')
+        kb=InlineKeyboardMarkup([
+            [InlineKeyboardButton('✅ Выплачено',callback_data=f'adm:refw:paid:{wid}'),
+             InlineKeyboardButton('❌ Отклонить',callback_data=f'adm:refw:decline:{wid}')],
+            [InlineKeyboardButton('◀️ Назад',callback_data='adm:refw:pending')]])
+        await q.edit_message_text(text,parse_mode=ParseMode.HTML,reply_markup=kb); return
+    if d.startswith('adm:refw:paid:'):
+        wid=int(d.split(':',3)[3]); r=ref_withdrawal_get(wid)
+        if not r: await q.edit_message_text('❌'); return
+        if r['status']!='pending':
+            await q.answer('Уже обработана',show_alert=True); return
+        ref_withdrawal_set_status(wid,'paid',by=q.from_user.id)
+        await q.edit_message_text(f'✅ Заявка #{wid} помечена как выплаченная.',
+            parse_mode=ParseMode.HTML,reply_markup=kb_admin_refw())
+        try:
+            await context.bot.send_message(r['user_id'],
+                f'✅ <b>Вывод #{wid} выполнен</b>\n\n💰 {r["amount"]} ₽',
+                parse_mode=ParseMode.HTML)
+        except: pass
+        return
+    if d.startswith('adm:refw:decline:'):
+        wid=int(d.split(':',3)[3]); r=ref_withdrawal_get(wid)
+        if not r: await q.edit_message_text('❌'); return
+        if r['status']!='pending':
+            await q.answer('Уже обработана',show_alert=True); return
+        ref_withdrawal_set_status(wid,'declined',by=q.from_user.id)
+        change_ref_balance(r['user_id'],r['amount'])
+        await q.edit_message_text(f'❌ Заявка #{wid} отклонена. Средства возвращены.',
+            parse_mode=ParseMode.HTML,reply_markup=kb_admin_refw())
+        try:
+            await context.bot.send_message(r['user_id'],
+                f'❌ <b>Вывод #{wid} отклонён</b>\n\n💰 {r["amount"]} ₽ вернулись на реф-баланс.',
+                parse_mode=ParseMode.HTML)
+        except: pass
+        return
 
     if d=='adm:banners':
         await q.edit_message_text('🖼 <b>Баннеры экранов</b>\n━━━━━━━━━━━━━━━━━━━━\n\n✅ — загружен, ⬜ — нет.\n📁 — файл в репо, ⚡ — закэширован.\n\n<i>Рекомендую 1280×640 или 1024×512.</i>',
@@ -2197,7 +2682,7 @@ async def cmd_addrub(update,context):
     msg=f'✅ <code>{uid}</code> +{amount} ₽ → {rub_balance(uid)} ₽'
     for ref,lvl,bonus in payouts:
         msg+=f'\n💸 L{lvl} +{bonus} ₽ → <code>{ref}</code>'
-        try: await context.bot.send_message(ref,f'💸 L{lvl} +<b>{bonus} ₽</b>',parse_mode=ParseMode.HTML)
+        try: await context.bot.send_message(ref,f'💸 L{lvl} +<b>{bonus} ₽</b> (реф-баланс)',parse_mode=ParseMode.HTML)
         except: pass
     await update.message.reply_text(msg,parse_mode=ParseMode.HTML)
 async def cmd_setadmin(update,context):
@@ -2291,7 +2776,7 @@ async def cmd_setbanner(update,context):
     if not is_admin(uid): return
     if not context.args:
         keys_list='\n'.join(f'• <code>{k}</code> — {v}' for k,v in BANNER_KEYS.items())
-        await update.message.reply_text(f'🖼 <b>Баннеры</b>\n\nИспользование: <code>/setbanner KEY</code>\n\n<b>Ключи:</b>\n{keys_list}\n\n<i>Файлы по умолчанию: banners/KEY.png в репозитории.</i>',parse_mode=ParseMode.HTML); return
+        await update.message.reply_text(f'🖼 <b>Баннеры</b>\n\nИспользование: <code>/setbanner KEY</code>\n\n<b>Ключи:</b>\n{keys_list}',parse_mode=ParseMode.HTML); return
     key=context.args[0].lower()
     if key not in BANNER_KEYS:
         await update.message.reply_text(f'❌ Ключ <code>{key}</code> не найден.',parse_mode=ParseMode.HTML); return
@@ -2370,7 +2855,6 @@ async def cmd_advs(update,context):
 # ═══════════════════════════════════════════════════════════
 async def post_init(app):
     init_db()
-    # прогрев кэша настроек
     setting('image_cost'); setting('coin_rate'); setting('ref_percent')
     setting('timeout'); setting('rate_limit_count'); setting('rate_limit_window')
     setting('start_balance'); setting('max_concurrent')
@@ -2379,7 +2863,6 @@ async def post_init(app):
     for _ in range(n): workers.append(asyncio.create_task(worker(app)))
     workers.append(asyncio.create_task(queue_position_updater(app)))
 
-    # загрузка баннеров-файлов в Telegram (для быстрого file_id)
     await upload_banner_files(app)
     inline_prompt_purge()
 
@@ -2416,6 +2899,7 @@ def build_app():
     app=(Application.builder().token(BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build())
     app.add_handler(CommandHandler('start',cmd_start))
     app.add_handler(CommandHandler('help',cmd_help))
+    app.add_handler(CommandHandler('ref_history',cmd_ref_history))
     app.add_handler(CommandHandler('admin',cmd_admin))
     app.add_handler(CommandHandler('admin_help',cmd_admin_help))
     app.add_handler(CommandHandler('stats',cmd_stats))
@@ -2445,6 +2929,7 @@ def build_app():
     app.add_handler(PreCheckoutQueryHandler(pre_checkout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT,on_successful_payment))
     app.add_handler(InlineQueryHandler(on_inline_query))
+    app.add_handler(ChosenInlineResultHandler(on_chosen_inline))
     app.add_handler(CallbackQueryHandler(on_callbacks))
     app.add_handler(MessageHandler((filters.TEXT & ~filters.COMMAND) | filters.PHOTO,on_message))
     app.add_error_handler(on_error)
@@ -2453,9 +2938,8 @@ def build_app():
 def run_once():
     app=build_app()
     if PUBLIC_DOMAIN:
-        # Webhook-режим
         webhook_url=f'https://{PUBLIC_DOMAIN}{WEBHOOK_PATH}'
-        log.info('Webhook: %s', webhook_url)
+        log.info('Webhook: %s',webhook_url)
         app.run_webhook(
             listen='0.0.0.0',
             port=PORT,
@@ -2465,7 +2949,6 @@ def run_once():
             allowed_updates=Update.ALL_TYPES,
         )
     else:
-        # Polling (локально)
         log.info('Polling mode (no RAILWAY_PUBLIC_DOMAIN)')
         app.run_polling(allowed_updates=Update.ALL_TYPES,drop_pending_updates=False)
 
