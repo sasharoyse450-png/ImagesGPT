@@ -6,6 +6,7 @@ from telegram import(Update,InlineKeyboardButton,InlineKeyboardMarkup,InputMedia
 from telegram.constants import ParseMode,ChatAction
 from telegram.ext import(Application,CommandHandler,MessageHandler,CallbackQueryHandler,ContextTypes,filters,PreCheckoutQueryHandler,InlineQueryHandler,ChosenInlineResultHandler)
 
+# ═══════════ CONFIG ═══════════
 BOT_TOKEN='8979688376:AAG_QM3t0NKOEiieC3_38wvb-ZsmziaXzRE'
 ADMIN_ID=8130244626
 API_KEY='tc_live_6a7075340c595455d423a0471dc7a534d8450dddd9c6de39'
@@ -31,6 +32,12 @@ NEW_USER_LIMIT_WINDOW=300
 REF_WITHDRAW_TO_BALANCE_MIN=10
 REF_WITHDRAW_TO_CARD_MIN=100
 GEN_COOLDOWN=300
+# 💎 Premium
+PREMIUM_STARS=100
+PREMIUM_DAYS=30
+PREMIUM_COOLDOWN=30
+# 🚀 Ускорение
+RUSH_COST=2
 PORT=int(os.environ.get('PORT',8080))
 WEBHOOK_PATH='/webhook'
 PUBLIC_DOMAIN=os.environ.get('RAILWAY_PUBLIC_DOMAIN')
@@ -51,14 +58,14 @@ BANNER_KEYS={'menu':'Главное меню','balance':'Профиль','topup'
 logging.basicConfig(level=logging.INFO,format='%(asctime)s | %(levelname)s | %(message)s')
 log=logging.getLogger('ImagesGPT')
 
+# ═══════════ I18N ═══════════
 LANGS=('ru','en')
 LANGS_NAMES={'ru':'🇷🇺 Русский','en':'🇬🇧 English'}
 
-# Сокращённые переводы — только то, что используется
 TR={'ru':{
 'menu_title':'🤖 <b>ImagesGPT</b>','balance':'💰 Профиль','topup':'💝 Пожертвование','history':'📜 История',
 'promo':'🎁 Промокод','ref':'👥 Пригласить друга','support':'🆘 Поддержка','help':'ℹ️ Помощь',
-'lang':'🌐 Язык','roulette':'🎰 Рулетка','create_btn':'🎨 Создать изображение',
+'lang':'🌐 Язык','roulette':'🎰 Рулетка','premium':'💎 Premium','create_btn':'🎨 Создать изображение',
 'back_menu':'◀️ В меню','back':'◀️ Назад','cancel':'❌ Отмена','rubles':'Рубли','coins':'Монеты',
 'rate':'Курс','gen_cost':'Генерация','choose_action':'Выбери действие ниже 👇',
 'your_balance':'💰 <b>Профиль</b>\n━━━━━━━━━━━━━━━━━━━━',
@@ -95,7 +102,7 @@ TR={'ru':{
 'support_continue':'💬 Продолжить тикет #{tid}','support_create_ask':'✍️ <b>Опиши проблему</b> (текст или фото):',
 'support_created':'✅ <b>Тикет #{tid} создан.</b>','support_none':'📋 У тебя пока нет тикетов.',
 'support_my_title':'📋 <b>Твои тикеты</b>','help_title':'ℹ️ <b>Помощь</b>',
-'help_text':'🎨 <b>Создать изображение</b> — <b>бесплатно</b>, 1 раз в 5 минут.\n\n💰 <b>Профиль</b> — статистика и монеты.\n\n💝 <b>Пожертвование</b> — если хочешь поддержать.\n\n🎰 <b>Рулетка</b> — раз в неделю крути монеты.\n\n📜 <b>История</b> — список генераций.\n\n👥 <b>Пригласить друга</b> — {percent}% с донатов.\n\n🎁 <b>Промокод</b> — бонусный код.\n\n🆘 <b>Поддержка</b> — тикет.\n\n✨ <b>Inline</b> — @{bot} промпт в любом чате.',
+'help_text':'🎨 <b>Создать изображение</b> — <b>бесплатно</b>, 1 раз в 5 минут.\n\n💎 <b>Premium</b> — быстрее и приоритетнее.\n\n💰 <b>Профиль</b> — статистика и монеты.\n\n💝 <b>Пожертвование</b> — если хочешь поддержать.\n\n🎰 <b>Рулетка</b> — раз в неделю крути монеты.\n\n📜 <b>История</b> — список генераций.\n\n👥 <b>Пригласить друга</b> — {percent}% с донатов.\n\n🎁 <b>Промокод</b> — бонусный код.\n\n🆘 <b>Поддержка</b> — тикет.\n\n✨ <b>Inline</b> — @{bot} промпт в любом чате.',
 'free_gen':'🎨 <b>Бесплатно</b>',
 'create_prompt':'🎨 <b>Напиши описание изображения:</b>\n\nМаксимум 4000 символов.',
 'checking':'🔎 Проверяю запрос…','blocked':'❌ <b>Запрос отклонён.</b>','choose_size':'📐 <b>Выбери размер:</b>',
@@ -104,7 +111,8 @@ TR={'ru':{
 'in_progress':'🎨 <b>Генерирую…</b>\nОбычно 30–90 секунд.\nЛимит: {limit}.','done_title':'✅ <b>Готово!</b>',
 'time_label':'⏱ Время','left_coins':'💰 Монеты','timeout':'⏱ Превышен лимит ({limit}). Попробуй ещё раз.',
 'error_gen':'❌ Ошибка генерации. Попробуй ещё раз.',
-'cooldown':'⏱ <b>Следующая генерация через {time}</b>\n\nЛимит: 1 генерация раз в 5 минут.',
+'cooldown':'⏱ <b>Следующая генерация через {time}</b>\n\nЛимит: 1 генерация раз в 5 минут.\n\n💎 <b>Premium</b> — кулдаун 30 сек → /premium',
+'insufficient_coins':'❌ Недостаточно монет.',
 'terms_title':'📄 <b>Перед началом работы</b>','terms_lead':'Ознакомься с документами:',
 'terms_privacy':'🔒 Политика конфиденциальности','terms_offer':'📜 Пользовательское соглашение',
 'terms_note':'Для использования бота необходимо принять условия.',
@@ -127,7 +135,7 @@ TR={'ru':{
 'en':{
 'menu_title':'🤖 <b>ImagesGPT</b>','balance':'💰 Profile','topup':'💝 Donate','history':'📜 History',
 'promo':'🎁 Promo','ref':'👥 Invite a friend','support':'🆘 Support','help':'ℹ️ Help',
-'lang':'🌐 Language','roulette':'🎰 Roulette','create_btn':'🎨 Create image',
+'lang':'🌐 Language','roulette':'🎰 Roulette','premium':'💎 Premium','create_btn':'🎨 Create image',
 'back_menu':'◀️ Menu','back':'◀️ Back','cancel':'❌ Cancel','rubles':'Rubles','coins':'Coins',
 'rate':'Rate','gen_cost':'Generation','choose_action':'Choose an action 👇',
 'your_balance':'💰 <b>Profile</b>\n━━━━━━━━━━━━━━━━━━━━',
@@ -164,7 +172,7 @@ TR={'ru':{
 'support_continue':'💬 Continue ticket #{tid}','support_create_ask':'✍️ <b>Describe the issue</b>:',
 'support_created':'✅ <b>Ticket #{tid} created.</b>','support_none':'📋 You have no tickets yet.',
 'support_my_title':'📋 <b>Your tickets</b>','help_title':'ℹ️ <b>Help</b>',
-'help_text':'🎨 <b>Create image</b> — <b>free</b>, once per 5 min.\n\n💰 <b>Profile</b> — stats and coins.\n\n💝 <b>Donate</b> — if you want.\n\n🎰 <b>Roulette</b> — free coins weekly.\n\n📜 <b>History</b> — generations.\n\n👥 <b>Invite</b> — {percent}% of donations.\n\n🎁 <b>Promo</b> — bonus code.\n\n🆘 <b>Support</b> — ticket.\n\n✨ <b>Inline</b> — @{bot} prompt in any chat.',
+'help_text':'🎨 <b>Create image</b> — <b>free</b>, once per 5 min.\n\n💎 <b>Premium</b> — faster, priority.\n\n💰 <b>Profile</b> — stats and coins.\n\n💝 <b>Donate</b> — if you want.\n\n🎰 <b>Roulette</b> — free coins weekly.\n\n📜 <b>History</b> — generations.\n\n👥 <b>Invite</b> — {percent}% of donations.\n\n🎁 <b>Promo</b> — bonus code.\n\n🆘 <b>Support</b> — ticket.\n\n✨ <b>Inline</b> — @{bot} prompt in any chat.',
 'free_gen':'🎨 <b>Free</b>',
 'create_prompt':'🎨 <b>Write a description:</b>\n\nMax 4000 chars.',
 'checking':'🔎 Checking…','blocked':'❌ <b>Request blocked.</b>','choose_size':'📐 <b>Choose size:</b>',
@@ -173,7 +181,8 @@ TR={'ru':{
 'in_progress':'🎨 <b>Generating…</b>\nUsually 30–90 sec.\nLimit: {limit}.','done_title':'✅ <b>Done!</b>',
 'time_label':'⏱ Time','left_coins':'💰 Coins','timeout':'⏱ Limit exceeded ({limit}). Try again.',
 'error_gen':'❌ Generation error. Try again.',
-'cooldown':'⏱ <b>Next generation in {time}</b>\n\nLimit: 1 per 5 min.',
+'cooldown':'⏱ <b>Next generation in {time}</b>\n\nLimit: 1 per 5 min.\n\n💎 <b>Premium</b> — 30 sec cooldown → /premium',
+'insufficient_coins':'❌ Not enough coins.',
 'terms_title':'📄 <b>Before you start</b>','terms_lead':'Please review the documents:',
 'terms_privacy':'🔒 Privacy Policy','terms_offer':'📜 Terms of Service',
 'terms_note':'You must accept the terms to use the bot.',
@@ -249,6 +258,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS ref_withdrawals(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,
             amount INTEGER NOT NULL,method TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',
             card TEXT,created_at TEXT,processed_at TEXT,processed_by INTEGER,note TEXT);
+        CREATE TABLE IF NOT EXISTS premium(user_id INTEGER PRIMARY KEY,expires_at TEXT,bought_at TEXT);
     ''')
     for stmt in [
         'ALTER TABLE users ADD COLUMN banned INTEGER NOT NULL DEFAULT 0',
@@ -268,7 +278,9 @@ def init_db():
         except sqlite3.OperationalError: pass
     for k,v in {'log_level':'2','max_concurrent':'1','image_cost':'0','start_balance':'10',
         'coin_rate':'2','ref_percent':'10','timeout':str(TIMEOUT_DEFAULT),
-        'rate_limit_count':'10','rate_limit_window':'60'}.items():
+        'rate_limit_count':'10','rate_limit_window':'60',
+        'premium_stars':str(PREMIUM_STARS),'premium_days':str(PREMIUM_DAYS),
+        'premium_cooldown':str(PREMIUM_COOLDOWN),'rush_cost':str(RUSH_COST)}.items():
         c.execute('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)',(k,v))
     c.commit()
     seed_apis()
@@ -309,6 +321,31 @@ def rate_limit_count():
 def rate_limit_window():
     try: return max(5,int(setting('rate_limit_window','60')))
     except: return 60
+
+# ═══════════ PREMIUM ═══════════
+def premium_until(uid):
+    r=db().execute('SELECT expires_at FROM premium WHERE user_id=?',(uid,)).fetchone()
+    if not r or not r['expires_at']: return None
+    try: return datetime.fromisoformat(r['expires_at'])
+    except: return None
+def is_premium(uid):
+    exp=premium_until(uid)
+    return bool(exp and exp>datetime.now())
+def premium_days_left(uid):
+    exp=premium_until(uid)
+    if not exp or exp<=datetime.now(): return 0
+    return max(0,(exp-datetime.now()).days)
+def activate_premium(uid,days=None):
+    days=days or int(setting('premium_days',str(PREMIUM_DAYS)))
+    now=datetime.now()
+    cur=premium_until(uid)
+    base=cur if cur and cur>now else now
+    new_exp=base+timedelta(days=days)
+    c=db()
+    c.execute('INSERT OR REPLACE INTO premium(user_id,expires_at,bought_at) VALUES(?,?,?)',
+        (uid,new_exp.isoformat(timespec='seconds'),now.isoformat(timespec='seconds')))
+    c.commit()
+    return new_exp
 
 # ═══════════ BANNERS ═══════════
 def banner_file(key):
@@ -363,7 +400,6 @@ def _strip_header(bkey,text):
     if len(lines)>=2 and lines[1].strip() and set(lines[1].strip())<={'━'}:
         return '\n'.join(lines[2:]).lstrip('\n')
     return text
-
 async def upload_banner_files(app):
     if not os.path.isdir(BANNERS_DIR): return
     for key in BANNER_KEYS:
@@ -419,7 +455,6 @@ async def show_screen(q,context,uid,bkey,text,kb):
                 else: await context.bot.send_photo(msg.chat_id,open(bval,'rb'),caption=text,parse_mode=ParseMode.HTML,reply_markup=kb)
             else: await context.bot.send_message(msg.chat_id,text,parse_mode=ParseMode.HTML,reply_markup=kb)
         except: pass
-
 async def send_screen(update,uid,bkey,text,kb):
     banner=get_banner(bkey) if bkey else None
     use_photo=bool(banner) and len(text)<=CAPTION_MAX
@@ -458,54 +493,40 @@ def api_active(typ):
     if typ=='image': return [{'id':0,'name':'env','base_url':API_BASE,'api_key':API_KEY,'model':IMAGE_MODEL}]
     return [{'id':0,'name':'env','base_url':API_BASE,'api_key':API_KEY,'model':MODERATION_MODEL}]
 
-# ═══════════ BALANCE FETCH ═══════════
 async def fetch_api_balance(api):
-    """Пробует получить баланс с эндпоинта /balance. Возвращает строку."""
     try:
         headers={'Authorization':'Bearer '+api['api_key'],'Content-Type':'application/json'}
         async with httpx.AsyncClient(timeout=20) as c:
             r=await c.get(api['base_url']+'/balance',headers=headers)
-        if r.status_code==404:
-            return '❌ Эндпоинт /balance не найден'
-        if r.status_code==401:
-            return '❌ 401 — неверный ключ'
+        if r.status_code==404: return '❌ /balance не найден'
+        if r.status_code==401: return '❌ 401 неверный ключ'
         r.raise_for_status()
         data=r.json()
-        # Пытаемся найти баланс в разных полях
-        candidates=[data.get('balance'),data.get('available'),data.get('total_available'),
-                    data.get('credits'),data.get('amount'),data.get('value')]
+        cands=[data.get('balance'),data.get('available'),data.get('total_available'),
+               data.get('credits'),data.get('amount'),data.get('value')]
         if isinstance(data.get('data'),dict):
             d=data['data']
-            candidates+=[d.get('balance'),d.get('available'),d.get('total_available'),
-                         d.get('credits'),d.get('amount'),d.get('value')]
-        for v in candidates:
+            cands+=[d.get('balance'),d.get('available'),d.get('total_available'),
+                    d.get('credits'),d.get('amount'),d.get('value')]
+        for v in cands:
             if v is not None and not isinstance(v,(dict,list)):
                 return f'💰 <b>{v}</b>'
-        # Ничего не нашли — покажем сырой JSON (обрезанный)
-        raw=html.escape(r.text[:300])
-        return f'⚠️ Не распознано:\n<code>{raw}</code>'
-    except httpx.HTTPStatusError as e:
-        return f'❌ HTTP {e.response.status_code}'
-    except Exception as e:
-        return f'❌ {html.escape(str(e)[:100])}'
+        return f'⚠️ <code>{html.escape(r.text[:300])}</code>'
+    except httpx.HTTPStatusError as e: return f'❌ HTTP {e.response.status_code}'
+    except Exception as e: return f'❌ {html.escape(str(e)[:100])}'
 
 async def collect_balances():
-    """Собирает балансы всех активных API."""
     rows=api_list()
-    if not rows:
-        return '📭 Нет активных API.'
+    if not rows: return '📭 Нет API.'
     lines=['💳 <b>Балансы API</b>','━━━━━━━━━━━━━━━━━━━━','']
     for r in rows:
         icon='🖼' if r['type']=='image' else '🧠'
         status='✅' if r['active'] else '⚪'
         lines.append(f'{status} {icon} <b>#{r["id"]} {html.escape(r["name"] or "—")}</b>')
         if not r['active']:
-            lines.append('   ⚪ выключен')
-            lines.append('')
-            continue
+            lines.append('   ⚪ выключен'); lines.append(''); continue
         bal=await fetch_api_balance(r)
-        lines.append(f'   {bal}')
-        lines.append('')
+        lines.append(f'   {bal}'); lines.append('')
     return '\n'.join(lines).rstrip()
 
 # ═══════════ STARS ═══════════
@@ -555,16 +576,17 @@ def check_rate(uid):
     if len(times)>=limit:
         wait=int(window-(now-times[0]))+1; _rate_log[uid]=times; return False,wait
     times.append(now); _rate_log[uid]=times; return True,0
-
 def check_gen_cooldown(uid):
-    """1 генерация раз в 5 минут."""
     now=time.time()
+    cd=GEN_COOLDOWN
+    if is_premium(uid):
+        try: cd=int(setting('premium_cooldown',str(PREMIUM_COOLDOWN)))
+        except: cd=PREMIUM_COOLDOWN
     last=_gen_cooldown.get(uid,0)
-    if now-last<GEN_COOLDOWN:
-        return False,int(GEN_COOLDOWN-(now-last))+1
+    if now-last<cd:
+        return False,int(cd-(now-last))+1
     _gen_cooldown[uid]=now
     return True,0
-
 _new_user_log={}
 def is_new_account(uid):
     r=db().execute('SELECT created_at FROM users WHERE user_id=?',(uid,)).fetchone()
@@ -860,8 +882,9 @@ def set_lang(uid,lang):
 
 # ═══════════ KEYBOARDS ═══════════
 def kb_menu(uid):
-    return InlineKeyboardMarkup([
+    rows=[
         [InlineKeyboardButton(t(uid,'create_btn'),callback_data='create')],
+        [InlineKeyboardButton(t(uid,'premium'),callback_data='premium')],
         [InlineKeyboardButton(t(uid,'balance'),callback_data='balance'),
          InlineKeyboardButton(t(uid,'topup'),callback_data='topup')],
         [InlineKeyboardButton(t(uid,'history'),callback_data='history'),
@@ -870,7 +893,8 @@ def kb_menu(uid):
          InlineKeyboardButton(t(uid,'ref'),callback_data='ref')],
         [InlineKeyboardButton(t(uid,'support'),callback_data='support'),
          InlineKeyboardButton(t(uid,'help'),callback_data='help')],
-        [InlineKeyboardButton(t(uid,'lang'),callback_data='lang')]])
+        [InlineKeyboardButton(t(uid,'lang'),callback_data='lang')]]
+    return InlineKeyboardMarkup(rows)
 def kb_done(uid):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(t(uid,'share_btn'),url=share_bot_url(uid))],
@@ -939,8 +963,14 @@ def kb_ticket_admin(tid):
     return InlineKeyboardMarkup([[
         InlineKeyboardButton('✍️ Ответить',callback_data=f'ticket_reply:{tid}'),
         InlineKeyboardButton('🔒 Закрыть',callback_data=f'ticket_close:{tid}')]])
-def kb_queue_cancel(uid,jid):
-    return InlineKeyboardMarkup([[InlineKeyboardButton(t(uid,'queue_cancel'),callback_data=f'q:cancel:{jid}')]])
+def kb_queue_cancel(uid,jid,can_rush=False):
+    rows=[]
+    if can_rush and not is_premium(uid):
+        try: rc=int(setting('rush_cost',str(RUSH_COST)))
+        except: rc=RUSH_COST
+        rows.append([InlineKeyboardButton(f'🚀 Ускорить за {rc} 🪙',callback_data=f'q:rush:{jid}')])
+    rows.append([InlineKeyboardButton(t(uid,'queue_cancel'),callback_data=f'q:cancel:{jid}')])
+    return InlineKeyboardMarkup(rows)
 def kb_roulette(uid,can_spin=True):
     rows=[]
     if can_spin: rows.append([InlineKeyboardButton(t(uid,'roulette_spin'),callback_data='roulette:spin')])
@@ -1020,11 +1050,19 @@ def kb_admin_settings():
         [InlineKeyboardButton(f'📊 Курс: 1 🪙 = {coin_rate()} ₽',callback_data='adm:set:coin_rate')],
         [InlineKeyboardButton(f'💸 Реф: {ref_percent()}%',callback_data='adm:set:ref_percent')],
         [InlineKeyboardButton(f'⏳ Rate-limit: {rate_limit_count()}/{rate_limit_window()}с',callback_data='adm:ratelimit')],
+        [InlineKeyboardButton(f'💎 Premium: {setting("premium_stars",str(PREMIUM_STARS))}⭐ / {setting("premium_days",str(PREMIUM_DAYS))}дн',callback_data='adm:premium')],
         [InlineKeyboardButton('◀️ Назад',callback_data='adm:main')]])
 def kb_admin_ratelimit():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f'🔢 Кол-во: {rate_limit_count()}',callback_data='adm:set:rate_limit_count')],
         [InlineKeyboardButton(f'⏱ Окно: {rate_limit_window()} сек',callback_data='adm:set:rate_limit_window')],
+        [InlineKeyboardButton('◀️ Назад',callback_data='adm:settings')]])
+def kb_admin_premium():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f'⭐ Цена: {setting("premium_stars",str(PREMIUM_STARS))}',callback_data='adm:set:premium_stars')],
+        [InlineKeyboardButton(f'📅 Дней: {setting("premium_days",str(PREMIUM_DAYS))}',callback_data='adm:set:premium_days')],
+        [InlineKeyboardButton(f'⏱ Кулдаун: {setting("premium_cooldown",str(PREMIUM_COOLDOWN))}с',callback_data='adm:set:premium_cooldown')],
+        [InlineKeyboardButton(f'🚀 Ускорение: {setting("rush_cost",str(RUSH_COST))} 🪙',callback_data='adm:set:rush_cost')],
         [InlineKeyboardButton('◀️ Назад',callback_data='adm:settings')]])
 def kb_user_card(uid):
     u=get_user(uid); banned=bool(u['banned']); adv=adv_get_by_uid(uid)
@@ -1032,6 +1070,7 @@ def kb_user_card(uid):
         [InlineKeyboardButton('💰 Установить монеты',callback_data=f'adm:setbal:{uid}')],
         [InlineKeyboardButton('🪙 Добавить монеты',callback_data=f'adm:addbal:{uid}')],
         [InlineKeyboardButton('💵 Начислить рубли',callback_data=f'adm:addrub:{uid}')],
+        [InlineKeyboardButton('💎 Выдать Premium 30д',callback_data=f'adm:premgive:{uid}')],
         [InlineKeyboardButton('🚫 Разбанить' if banned else '⛔ Забанить',callback_data=f'adm:userban:{uid}')],
         [InlineKeyboardButton('📜 История',callback_data=f'adm:hist:{uid}')]]
     if adv:
@@ -1056,14 +1095,18 @@ def kb_promo_list():
 
 # ═══════════ TEXTS ═══════════
 def main_text(uid):
+    prem=''
+    if is_premium(uid):
+        prem=f'\n💎 <b>Premium</b>: {premium_days_left(uid)} дн.'
     return (f'{t(uid,"menu_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n'
         f'🪙 {t(uid,"coins")}: <b>{balance(uid)}</b>\n'
-        f'🎁 {t(uid,"ref_balance")}: <b>{ref_balance(uid)} ₽</b>\n\n'
+        f'🎁 {t(uid,"ref_balance")}: <b>{ref_balance(uid)} ₽</b>{prem}\n\n'
         f'🎨 {t(uid,"gen_cost")}: <b>{t(uid,"free_gen")}</b>\n\n'
         f'{t(uid,"choose_action")}')
 TERMS_TPL='{title}\n\n{lead}\n\n🔒 <a href="{privacy}">{privacy_t}</a>\n📜 <a href="{offer}">{offer_t}</a>\n\n{note}'
 ADMIN_HELP=('🛠 <b>Админ-команды</b>\n━━━━━━━━━━━━━━━━━━━━\n\n'
     '👥 <code>/user ID</code> • <code>/setbalance</code> • <code>/addbalance</code> • <code>/setrub</code> • <code>/addrub</code>\n\n'
+    '💎 <code>/givepremium ID [DAYS]</code> • <code>/unpremium ID</code>\n\n'
     '🚫 <code>/ban ID [прич]</code> • <code>/unban ID</code>\n\n'
     '⚙️ <code>/setrate N</code> • <code>/setref N</code> • <code>/settimeout N</code>\n\n'
     '🖼 <code>/setbanner KEY</code> • <code>/banners</code> • <code>/delbanner KEY</code>\n\n'
@@ -1109,7 +1152,6 @@ async def moderate(prompt):
         except Exception as e:
             log.warning('moderate #%s: %s',api.get('id'),e); continue
     return True,''
-
 async def translate_prompt(prompt):
     if not prompt: return prompt
     cyr=sum(1 for c in prompt if '\u0400'<=c<='\u04FF')
@@ -1129,7 +1171,6 @@ async def translate_prompt(prompt):
         except Exception as e:
             log.warning('translate #%s: %s',api.get('id'),e); continue
     return prompt
-
 async def generate(prompt,size,timeout_sec):
     last=None
     for api in api_active('image'):
@@ -1145,7 +1186,6 @@ async def generate(prompt,size,timeout_sec):
 
 # ═══════════ QUEUE ═══════════
 pending_jobs=[]; job_lock=asyncio.Lock(); workers=[]
-
 async def queue_position_updater(app):
     while True:
         try:
@@ -1156,11 +1196,13 @@ async def queue_position_updater(app):
                 pos=pos0+1
                 if j.get('last_pos')==pos or not j.get('msg_id'): continue
                 j['last_pos']=pos; uid=j['uid']
+                prefix='💎 ' if j.get('priority') else ''
                 try:
                     await app.bot.edit_message_text(chat_id=j['chat'],message_id=j['msg_id'],
                         text=(f'{t(uid,"queue_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n📐 {j["size"]}\n'
-                              f'📝 {html.escape(j["prompt"][:120])}\n\n{t(uid,"queue_pos")}: <b>{pos}</b>'),
-                        parse_mode=ParseMode.HTML,reply_markup=kb_queue_cancel(uid,j['job_id']))
+                              f'📝 {html.escape(j["prompt"][:120])}\n\n{prefix}{t(uid,"queue_pos")}: <b>{pos}</b>'),
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=kb_queue_cancel(uid,j['job_id'],can_rush=not j.get('priority')))
                 except: pass
         except asyncio.CancelledError: return
         except Exception as e: log.warning('queue upd: %s',e)
@@ -1184,7 +1226,7 @@ async def worker(app):
         try:
             if not is_inline: await app.bot.send_chat_action(chat,ChatAction.UPLOAD_PHOTO)
             await edit_safe(t(uid,'in_progress',limit=fmt_timeout()))
-            await alog(app,f'🎨 <b>Генерация</b>{" (inline)" if is_inline else ""}\n'
+            await alog(app,f'🎨 <b>Генерация</b>{" (inline)" if is_inline else ""}{" 💎" if job.get("priority") else ""}\n'
                 f'👤 <code>{uid}</code>\n📝 {html.escape(job["prompt"][:600])}',level=2)
             typing_task=None
             if not is_inline: typing_task=asyncio.create_task(_keep_typing(app,chat,timeout_sec))
@@ -1236,7 +1278,6 @@ async def worker(app):
             else: await app.bot.send_message(chat,f'{t(uid,"error_gen")}\n\n<code>{html.escape(str(e)[:400])}</code>',
                 parse_mode=ParseMode.HTML,reply_markup=kb_menu(uid))
             await alog(app,f'❌ <b>Ошибка</b> • 👤 <code>{uid}</code>\n<code>{html.escape(str(e)[:800])}</code>',level=1)
-
 async def _keep_typing(app,chat,max_sec):
     el=0
     try:
@@ -1251,7 +1292,10 @@ async def pre_checkout(update,context):
     q=update.pre_checkout_query
     try:
         parts=q.invoice_payload.split(':')
-        if len(parts)>=3 and parts[0]=='stars':
+        if parts[0]=='stars':
+            uid=int(parts[1])
+            if uid!=q.from_user.id: await q.answer(ok=False,error_message='Неверный получатель'); return
+        elif parts[0]=='premium':
             uid=int(parts[1])
             if uid!=q.from_user.id: await q.answer(ok=False,error_message='Неверный получатель'); return
     except: await q.answer(ok=False,error_message='Ошибка данных'); return
@@ -1261,12 +1305,30 @@ async def on_successful_payment(update,context):
     u=update.effective_user; ensure_user(u)
     sp=update.message.successful_payment
     cid=sp.telegram_payment_charge_id
+    payload=sp.invoice_payload or ''
+    # 💎 Premium
+    if payload.startswith('premium:'):
+        if stars_payment_exists(cid): return
+        try:
+            parts=payload.split(':')
+            days=int(parts[2]); stars=int(parts[3])
+        except:
+            days=PREMIUM_DAYS; stars=sp.total_amount
+        add_stars_payment(u.id,stars,int(stars*STAR_RATE),cid)
+        new_exp=activate_premium(u.id,days)
+        await update.message.reply_text(
+            f'💎 <b>Premium активирован!</b>\n\n⏰ До: <b>{new_exp.strftime("%d.%m.%Y %H:%M")}</b>\n'
+            f'Длительность: {days} дн.\n\n🚀 Кулдаун теперь {setting("premium_cooldown",str(PREMIUM_COOLDOWN))} сек, приоритет в очереди.',
+            parse_mode=ParseMode.HTML,reply_markup=kb_menu(u.id))
+        await alog(context.application,f'💎 <b>Premium</b>\n👤 <code>{u.id}</code> • {days} дн. • ⭐ {stars}',level=2)
+        return
+    # 💝 Обычный донат
     if stars_payment_exists(cid): return
     stars=sp.total_amount; rub=int(stars*STAR_RATE)
     add_stars_payment(u.id,stars,rub,cid)
     bonus_coins=0
     try:
-        parts=sp.invoice_payload.split(':')
+        parts=payload.split(':')
         if len(parts)>=4:
             idx=int(parts[3])
             if 0<=idx<len(STAR_PACKS): bonus_coins=STAR_PACKS[idx][1]
@@ -1296,7 +1358,7 @@ async def on_inline_query(update,context):
             input_message_content=InputTextMessageContent(f'⏱ Подожди {wait} сек'))],cache_time=0,is_personal=True); return
     ok2,wait2=check_gen_cooldown(uid)
     if not ok2:
-        await q.answer([InlineQueryResultArticle(id='cd',title='⏱ 1 генерация раз в 5 минут',
+        await q.answer([InlineQueryResultArticle(id='cd',title='⏱ Кулдаун',
             description=f'Подожди {fmt_cooldown(wait2)}',
             input_message_content=InputTextMessageContent(f'⏱ Подожди {fmt_cooldown(wait2)}'))],cache_time=0,is_personal=True); return
     sid=inline_prompt_save(uid,query)
@@ -1330,7 +1392,7 @@ async def on_chosen_inline(update,context):
     async with job_lock:
         pending_jobs.append({'job_id':str(uuid.uuid4()),'uid':uid,'chat':None,'msg_id':None,
             'inline_message_id':inline_id,'inline':True,'prompt':prompt,'prompt_api':prompt_api,
-            'size':'1024x1024','last_pos':0,'cancelled':False})
+            'size':'1024x1024','last_pos':0,'cancelled':False,'priority':is_premium(uid)})
 
 # ═══════════ USER HANDLERS ═══════════
 async def cmd_start(update,context):
@@ -1352,12 +1414,30 @@ async def cmd_start(update,context):
             offer=OFFER_URL,offer_t=t(u.id,'terms_offer'),note=t(u.id,'terms_note'))
         await update.message.reply_text(terms,parse_mode=ParseMode.HTML,reply_markup=kb_terms(u.id),disable_web_page_preview=True); return
     await send_screen(update,u.id,'menu',main_text(u.id),kb_menu(u.id))
-
 async def cmd_help(update,context):
     uid=update.effective_user.id
     text=f'{t(uid,"help_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n'+t(uid,'help_text',percent=ref_percent(),bot=BOT_USERNAME)
     await send_screen(update,uid,'help',text,kb_menu(uid))
-
+async def cmd_premium(update,context):
+    uid=update.effective_user.id; ensure_user(update.effective_user)
+    st_prem=is_premium(uid); days_left=premium_days_left(uid)
+    stars=int(setting('premium_stars',str(PREMIUM_STARS)))
+    days=int(setting('premium_days',str(PREMIUM_DAYS)))
+    rub=int(stars*STAR_RATE)
+    cd_prem=int(setting('premium_cooldown',str(PREMIUM_COOLDOWN)))
+    if st_prem:
+        text=(f'💎 <b>Premium активен</b>\n━━━━━━━━━━━━━━━━━━━━\n\n⏰ Осталось: <b>{days_left} дн.</b>\n\n'
+              f'✅ Кулдаун: <b>{cd_prem} сек</b> (вместо {GEN_COOLDOWN})\n✅ Приоритет в очереди\n\n'
+              f'Хочешь продлить?\n💰 <b>{stars} ⭐</b> ({rub} ₽) за {days} дн.')
+    else:
+        text=(f'💎 <b>Premium</b>\n━━━━━━━━━━━━━━━━━━━━\n\nЧто даёт:\n'
+              f'🚀 Кулдаун <b>{cd_prem} сек</b> вместо {GEN_COOLDOWN}\n'
+              f'⏩ Приоритет в очереди\n💎 Бейдж в профиле\n\n'
+              f'💰 Стоимость: <b>{stars} ⭐</b> ({rub} ₽) за {days} дн.')
+    await update.message.reply_text(text,parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(f'⭐ Купить за {stars} ⭐',callback_data='premium:buy')],
+            [InlineKeyboardButton('◀️ В меню',callback_data='menu')]]))
 async def cmd_ref_history(update,context):
     u=update.effective_user; ensure_user(u); uid=u.id
     rows=ref_withdrawals_list(uid)
@@ -1373,6 +1453,42 @@ async def cmd_ref_history(update,context):
 async def on_callbacks(update,context):
     q=update.callback_query; await q.answer()
     u=q.from_user; ensure_user(u); uid=u.id; d=q.data
+
+    # 💎 Premium покупка
+    if d=='premium:buy':
+        stars=int(setting('premium_stars',str(PREMIUM_STARS)))
+        days=int(setting('premium_days',str(PREMIUM_DAYS)))
+        rub=int(stars*STAR_RATE)
+        try:
+            await context.bot.send_invoice(
+                chat_id=q.message.chat_id,
+                title=f'💎 Premium — {days} дн.',
+                description=f'Кулдаун 30 сек + приоритет в очереди. {stars} ⭐ ({rub} ₽).',
+                payload=f'premium:{uid}:{days}:{stars}',
+                provider_token='',currency='XTR',
+                prices=[LabeledPrice(label=f'Premium {days} дн.',amount=stars)])
+        except Exception as e:
+            await q.message.reply_text(f'❌ Ошибка счёта: {e}')
+        return
+    if d=='premium':
+        st_prem=is_premium(uid); days_left=premium_days_left(uid)
+        stars=int(setting('premium_stars',str(PREMIUM_STARS)))
+        days=int(setting('premium_days',str(PREMIUM_DAYS)))
+        rub=int(stars*STAR_RATE)
+        cd_prem=int(setting('premium_cooldown',str(PREMIUM_COOLDOWN)))
+        if st_prem:
+            text=(f'💎 <b>Premium активен</b>\n━━━━━━━━━━━━━━━━━━━━\n\n⏰ Осталось: <b>{days_left} дн.</b>\n\n'
+                  f'✅ Кулдаун: <b>{cd_prem} сек</b> (вместо {GEN_COOLDOWN})\n✅ Приоритет в очереди\n\n'
+                  f'Хочешь продлить?\n💰 <b>{stars} ⭐</b> ({rub} ₽) за {days} дн.')
+        else:
+            text=(f'💎 <b>Premium</b>\n━━━━━━━━━━━━━━━━━━━━\n\nЧто даёт:\n'
+                  f'🚀 Кулдаун <b>{cd_prem} сек</b> вместо {GEN_COOLDOWN}\n'
+                  f'⏩ Приоритет в очереди\n💎 Бейдж в профиле\n\n'
+                  f'💰 Стоимость: <b>{stars} ⭐</b> ({rub} ₽) за {days} дн.')
+        await show_screen(q,context,uid,None,text,InlineKeyboardMarkup([
+            [InlineKeyboardButton(f'⭐ Купить за {stars} ⭐',callback_data='premium:buy')],
+            [InlineKeyboardButton(t(uid,'back_menu'),callback_data='menu')]]))
+        return
 
     if d.startswith('buy:'):
         try: idx=int(d.split(':',1)[1])
@@ -1407,10 +1523,8 @@ async def on_callbacks(update,context):
         st=roulette_status(uid)
         head=f'{t(uid,"roulette_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n'
         if st['can_spin']:
-            txt=head+t(uid,'roulette_rules')
-            await show_screen(q,context,uid,None,txt,kb_roulette(uid,can_spin=True)); return
-        txt=head+t(uid,'roulette_already_this_week')
-        await show_screen(q,context,uid,None,txt,kb_roulette(uid,can_spin=False)); return
+            await show_screen(q,context,uid,None,head+t(uid,'roulette_rules'),kb_roulette(uid,can_spin=True)); return
+        await show_screen(q,context,uid,None,head+t(uid,'roulette_already_this_week'),kb_roulette(uid,can_spin=False)); return
     if d=='roulette:spin':
         st=roulette_status(uid)
         if not st['can_spin']:
@@ -1432,8 +1546,10 @@ async def on_callbacks(update,context):
         await show_screen(q,context,uid,'menu',f'{t(uid,"lang_switched",lang=LANGS_NAMES.get(new_lang,new_lang))}\n\n'+main_text(uid),kb_menu(uid)); return
 
     if d=='balance':
+        prem=''
+        if is_premium(uid): prem=f'\n💎 Premium: <b>{premium_days_left(uid)} дн.</b>'
         text=(f'{t(uid,"your_balance")}\n\n🪙 {t(uid,"coins")}: <b>{balance(uid)}</b>\n'
-              f'🎁 {t(uid,"ref_balance")}: <b>{ref_balance(uid)} ₽</b>\n\n'
+              f'🎁 {t(uid,"ref_balance")}: <b>{ref_balance(uid)} ₽</b>{prem}\n\n'
               f'📊 {t(uid,"rate")}: <b>1 🪙 = {coin_rate()} ₽</b>')
         await show_screen(q,context,uid,'balance',text,kb_balance(uid)); return
 
@@ -1492,8 +1608,7 @@ async def on_callbacks(update,context):
 
     if d=='ref':
         total,earned=ref_stats(uid); percent=ref_percent()
-        adv=adv_get_by_uid(uid)
-        extra=''
+        adv=adv_get_by_uid(uid); extra=''
         if adv: extra=f'\n\n🎯 <b>Инфлюенсер-ссылка</b>\n<code>{adv_link(adv["code"])}</code>\nПроцент: <b>{adv["percent"]}%</b>'
         rb=ref_balance(uid)
         text=(f'{t(uid,"ref_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n{t(uid,"ref_your_link")}\n<code>{ref_link(uid)}</code>\n\n'
@@ -1590,6 +1705,36 @@ async def on_callbacks(update,context):
         if not is_admin(uid): return
         await handle_admin_cb(q,context,d); return
 
+    # 🚀 Ускорение
+    if d.startswith('q:rush:'):
+        jid=d.split(':',2)[2]
+        cost=int(setting('rush_cost',str(RUSH_COST)))
+        target=None
+        async with job_lock:
+            for j in pending_jobs:
+                if j['job_id']==jid and j['uid']==uid: target=j; break
+        if not target:
+            await q.answer('Уже не в очереди',show_alert=True); return
+        if target.get('priority'):
+            await q.answer('Уже ускорено',show_alert=True); return
+        if balance(uid)<cost:
+            await q.answer(t(uid,'insufficient_coins'),show_alert=True); return
+        change_balance(uid,-cost)
+        async with job_lock:
+            pending_jobs.remove(target)
+            target['priority']=True
+            idx=0
+            for i,j in enumerate(pending_jobs):
+                if j.get('priority'): idx=i+1
+                else: break
+            pending_jobs.insert(idx,target)
+        await q.answer('🚀 Ускорено!',show_alert=False)
+        text=(f'{t(uid,"queue_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n📐 {target["size"]}\n'
+              f'📝 {html.escape(target["prompt"][:120])}\n\n💎 {t(uid,"queue_pos")}: <b>1</b>')
+        await q.edit_message_text(text,parse_mode=ParseMode.HTML,
+            reply_markup=kb_queue_cancel(uid,jid,can_rush=False))
+        return
+
     if d.startswith('q:cancel:'):
         jid=d.split(':',2)[2]; refunded=False
         async with job_lock:
@@ -1628,13 +1773,25 @@ async def on_callbacks(update,context):
         if not item:
             await show_screen(q,context,uid,'menu','❌',kb_menu(uid)); return
         p,p_api,size=item; jid=str(uuid.uuid4())
+        priority=is_premium(uid)
         async with job_lock:
-            pos=len([j for j in pending_jobs if not j.get('cancelled')])+1
-            pending_jobs.append({'job_id':jid,'uid':uid,'chat':q.message.chat_id,
+            job={'job_id':jid,'uid':uid,'chat':q.message.chat_id,
                 'prompt':p,'prompt_api':p_api,'size':size,
-                'msg_id':q.message.message_id,'last_pos':pos,'cancelled':False})
-        text=(f'{t(uid,"queue_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n📐 {size}\n📝 {html.escape(p[:120])}\n\n{t(uid,"queue_pos")}: <b>{pos}</b>')
-        await show_screen(q,context,uid,None,text,kb_queue_cancel(uid,jid)); return
+                'msg_id':q.message.message_id,'last_pos':0,
+                'cancelled':False,'priority':priority}
+            if priority:
+                idx=0
+                for i,j in enumerate(pending_jobs):
+                    if j.get('priority'): idx=i+1
+                    else: break
+                pending_jobs.insert(idx,job)
+            else:
+                pending_jobs.append(job)
+            pos=len([j for j in pending_jobs if not j.get('cancelled') and not j.get('inline')])
+        prefix='💎 ' if priority else ''
+        text=(f'{t(uid,"queue_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n📐 {size}\n📝 {html.escape(p[:120])}\n\n'
+              f'{prefix}{t(uid,"queue_pos")}: <b>{pos}</b>')
+        await show_screen(q,context,uid,None,text,kb_queue_cancel(uid,jid,can_rush=not priority)); return
     if d.startswith('no:'):
         context.user_data.pop('waiting',None)
         await show_screen(q,context,uid,'menu','❌',kb_menu(uid)); return
@@ -1747,7 +1904,7 @@ async def on_message(update,context):
         try: iv=int(text)
         except ValueError: await update.message.reply_text('❌'); return
         if key=='timeout' and iv<30: await update.message.reply_text('❌ min 30'); return
-        if key in ('coin_rate','rate_limit_count','rate_limit_window') and iv<1: await update.message.reply_text('❌ min 1'); return
+        if key in ('coin_rate','rate_limit_count','rate_limit_window','premium_stars','premium_days','premium_cooldown','rush_cost') and iv<1: await update.message.reply_text('❌ min 1'); return
         if key=='ref_percent' and (iv<0 or iv>100): await update.message.reply_text('❌ 0-100'); return
         set_setting(key,iv)
         await update.message.reply_text(f'✅ <b>{key}</b> = <code>{iv}</code>',parse_mode=ParseMode.HTML); return
@@ -1962,9 +2119,10 @@ async def show_user_card(message,uid):
     st=roulette_status(uid); rl={'ok':'доступна','already':'уже крутил'}[st['reason']]
     adv=adv_get_by_uid(uid)
     adv_line=f'\n🎯 Инфлюенсер: <b>{adv["code"]}</b> ({adv["percent"]}%)' if adv else ''
+    prem_line=f'\n💎 Premium: <b>{premium_days_left(uid)} дн.</b>' if is_premium(uid) else ''
     txt=(f'👤 <b>Пользователь</b>\n━━━━━━━━━━━━━━━━━━━━\n'
         f'🆔 <code>{u["user_id"]}</code>\n📛 {html.escape(u["full_name"] or "—")}\n🔗 @{u["username"] or "—"}\n🌐 {u["lang"] or "ru"}\n'
-        f'💵 Рубли: <b>{u["rub_balance"]} ₽</b>\n🎁 Реф-баланс: <b>{u["ref_balance"]} ₽</b>\n🪙 Монеты: <b>{u["balance"]}</b>\n'
+        f'💵 Рубли: <b>{u["rub_balance"]} ₽</b>\n🎁 Реф-баланс: <b>{u["ref_balance"]} ₽</b>\n🪙 Монеты: <b>{u["balance"]}</b>{prem_line}\n'
         f'👑 Админ: {is_adm}\n📅 Регистрация: {u["created_at"]}\n👀 Последний визит: {u["last_seen"]}\n'
         f'👥 Пригласил: {total} • заработал: {earned} ₽\n🎰 Рулетка ({st["week_key"]}): <b>{rl}</b>{adv_line}\n'
         f'🚫 Бан: {"да — " + html.escape(u["ban_reason"] or "") if u["banned"] else "нет"}')
@@ -1990,11 +2148,12 @@ async def handle_admin_cb(q,context,d):
         rsum=c.execute('SELECT COALESCE(SUM(amount),0) AS s FROM ref_earnings').fetchone()['s']
         admins_count=c.execute('SELECT COUNT(*) AS n FROM admins').fetchone()['n']+1
         adv_count=c.execute('SELECT COUNT(*) AS n FROM adv_partners').fetchone()['n']
+        prem_count=c.execute('SELECT COUNT(*) AS n FROM premium WHERE expires_at>?',(datetime.now().isoformat(timespec='seconds'),)).fetchone()['n']
         avg,mn,mx,cnt=gen_time_stats()
         tline=''
         if cnt: tline=f'\n⏱ Время генерации:\n   • среднее: <b>{fmt_duration(avg)}</b>\n   • мин: {fmt_duration(mn)} • макс: {fmt_duration(mx)}\n   • замеров: {cnt}\n'
         txt=('📊 <b>Статистика</b>\n━━━━━━━━━━━━━━━━━━━━\n\n'
-            f'👥 Пользователей: <b>{users}</b>\n👑 Админов: <b>{admins_count}</b>\n🎯 Инфлюенсеров: <b>{adv_count}</b>\n'
+            f'👥 Пользователей: <b>{users}</b>\n👑 Админов: <b>{admins_count}</b>\n🎯 Инфлюенсеров: <b>{adv_count}</b>\n💎 Premium: <b>{prem_count}</b>\n'
             f'🚫 Забанено: <b>{banned}</b>\n🆘 Открытых тикетов: <b>{opent}</b>\n\n'
             f'💵 Донатов: <b>{tsum} ₽</b>\n💸 Реф-выплат: <b>{rsum} ₽</b>\n\n'
             f'🎨 Генераций: <b>{gens}</b>\n✅ Успешно: <b>{ok}</b>\n❌ Ошибок: <b>{err}</b>\n⏱ Таймаутов: <b>{touts}</b>\n{tline}')
@@ -2019,6 +2178,15 @@ async def handle_admin_cb(q,context,d):
             t_extra=f' • ⏱ {fmt_duration(r["elapsed"])}' if r['elapsed'] else ''
             lines.append(f'{i}. {icon} {html.escape(r["prompt"][:60])}\n   <i>{r["size"]} • {r["created_at"]}{t_extra}</i>')
         await q.edit_message_text('\n'.join(lines),parse_mode=ParseMode.HTML,reply_markup=kb_user_card(uid)); return
+    if d.startswith('adm:premgive:'):
+        tail=d.split(':',2)[2]
+        if not tail.isdigit(): await q.edit_message_text('❌'); return
+        uid=int(tail)
+        new_exp=activate_premium(uid,30)
+        await q.edit_message_text(f'✅ Premium выдан <code>{uid}</code> до {new_exp.strftime("%d.%m.%Y %H:%M")}',parse_mode=ParseMode.HTML)
+        try: await context.bot.send_message(uid,f'💎 <b>Тебе выдан Premium на 30 дней!</b>\n\nДо: {new_exp.strftime("%d.%m.%Y %H:%M")}\nКулдаун 30 сек, приоритет в очереди.',parse_mode=ParseMode.HTML)
+        except: pass
+        return
     if d.startswith('adm:userban:'):
         tail=d.split(':',2)[2]
         if not tail.isdigit(): await q.edit_message_text('❌'); return
@@ -2187,6 +2355,8 @@ async def handle_admin_cb(q,context,d):
         await q.edit_message_text(f'✅ <code>{code}</code> удалён.',parse_mode=ParseMode.HTML,reply_markup=kb_promos_main()); return
     if d=='adm:settings':
         await q.edit_message_text('⚙️ <b>Настройки</b>\n━━━━━━━━━━━━━━━━━━━━',parse_mode=ParseMode.HTML,reply_markup=kb_admin_settings()); return
+    if d=='adm:premium':
+        await q.edit_message_text('💎 <b>Premium настройки</b>\n━━━━━━━━━━━━━━━━━━━━',parse_mode=ParseMode.HTML,reply_markup=kb_admin_premium()); return
     if d=='adm:ratelimit':
         await q.edit_message_text(f'⏳ <b>Rate-limit</b>\n━━━━━━━━━━━━━━━━━━━━\n\n{rate_limit_count()} генераций за {rate_limit_window()} сек.',parse_mode=ParseMode.HTML,reply_markup=kb_admin_ratelimit()); return
     if d=='adm:log':
@@ -2222,6 +2392,29 @@ async def cmd_botbalance(update,context):
     m=await update.message.reply_text('💳 <b>Собираю балансы…</b>',parse_mode=ParseMode.HTML)
     txt=await collect_balances()
     await m.edit_text(txt,parse_mode=ParseMode.HTML)
+async def cmd_givepremium(update,context):
+    if not is_admin(update.effective_user.id): return
+    if not context.args:
+        await update.message.reply_text('Использование: /givepremium ID [DAYS]'); return
+    try: uid=int(context.args[0])
+    except ValueError: await update.message.reply_text('❌'); return
+    days=30
+    if len(context.args)>=2:
+        try: days=int(context.args[1])
+        except ValueError: await update.message.reply_text('❌ дней — число'); return
+    ensure_user_by_id(uid)
+    new_exp=activate_premium(uid,days)
+    await update.message.reply_text(f'✅ Premium выдан <code>{uid}</code> до {new_exp.strftime("%d.%m.%Y %H:%M")}',parse_mode=ParseMode.HTML)
+    try: await context.bot.send_message(uid,f'💎 <b>Premium активирован на {days} дн.</b>\n\nДо: {new_exp.strftime("%d.%m.%Y %H:%M")}',parse_mode=ParseMode.HTML)
+    except: pass
+async def cmd_unpremium(update,context):
+    if not is_admin(update.effective_user.id): return
+    if not context.args:
+        await update.message.reply_text('Использование: /unpremium ID'); return
+    try: uid=int(context.args[0])
+    except ValueError: await update.message.reply_text('❌'); return
+    c=db(); c.execute('DELETE FROM premium WHERE user_id=?',(uid,)); c.commit()
+    await update.message.reply_text(f'✅ Premium у <code>{uid}</code> снят.',parse_mode=ParseMode.HTML)
 async def cmd_stats(update,context):
     if not is_admin(update.effective_user.id): return
     c=db()
@@ -2231,13 +2424,14 @@ async def cmd_stats(update,context):
     tsum=c.execute('SELECT COALESCE(SUM(amount),0) AS s FROM topups').fetchone()['s']
     admins_count=c.execute('SELECT COUNT(*) AS n FROM admins').fetchone()['n']+1
     adv_count=c.execute('SELECT COUNT(*) AS n FROM adv_partners').fetchone()['n']
+    prem_count=c.execute('SELECT COUNT(*) AS n FROM premium WHERE expires_at>?',(datetime.now().isoformat(timespec='seconds'),)).fetchone()['n']
     avg,mn,mx,cnt=gen_time_stats()
     tline=f'\n⏱ Средн. генерация: {fmt_duration(avg)} ({cnt})' if cnt else ''
     await update.message.reply_text(
-        f'📊 Пользователей: {users}\n👑 Админов: {admins_count}\n🎯 Инфлюенсеров: {adv_count}\n'
+        f'📊 Пользователей: {users}\n👑 Админов: {admins_count}\n🎯 Инфлюенсеров: {adv_count}\n💎 Premium: {prem_count}\n'
         f'🎨 Генераций: {gens}\n🆘 Открытых: {opent}\n💵 Донатов: {tsum} ₽\n⏱ Таймаут: {get_timeout()} сек\n'
         f'📊 Курс: 1 🪙 = {coin_rate()} ₽\n💸 Реф: L1 {REF_L1}% • L2 {REF_L2}%\n'
-        f'⏳ Rate: {rate_limit_count()}/{rate_limit_window()}с\n⏱ Кулдаун генерации: {GEN_COOLDOWN}с{tline}')
+        f'⏳ Rate: {rate_limit_count()}/{rate_limit_window()}с\n🕒 Кулдаун: {GEN_COOLDOWN}с / Premium {setting("premium_cooldown",str(PREMIUM_COOLDOWN))}с{tline}')
 async def cmd_user(update,context):
     if not is_admin(update.effective_user.id) or not context.args:
         await update.message.reply_text('/user ID'); return
@@ -2453,6 +2647,7 @@ async def post_init(app):
     setting('image_cost'); setting('coin_rate'); setting('ref_percent')
     setting('timeout'); setting('rate_limit_count'); setting('rate_limit_window')
     setting('start_balance'); setting('max_concurrent')
+    setting('premium_stars'); setting('premium_days'); setting('premium_cooldown'); setting('rush_cost')
     n=int(setting('max_concurrent','1'))
     for _ in range(n): workers.append(asyncio.create_task(worker(app)))
     workers.append(asyncio.create_task(queue_position_updater(app)))
@@ -2464,11 +2659,13 @@ async def post_init(app):
     banners_cache=sum(1 for k in BANNER_KEYS if banner_cache_get(k))
     apis_img=len(api_list('image')); apis_mod=len(api_list('mod'))
     adv_count=len(adv_list())
+    prem_count=db().execute('SELECT COUNT(*) AS n FROM premium WHERE expires_at>?',(datetime.now().isoformat(timespec='seconds'),)).fetchone()['n']
     await alog(app,
         f'🟢 <b>ImagesGPT запущен</b>\n👷 Воркеров: <code>{n}</code>\n🎨 <code>{IMAGE_MODEL}</code>\n'
-        f'⏱ Таймаут: <code>{fmt_timeout()}</code>\n🕒 Кулдаун генерации: <code>{GEN_COOLDOWN}с</code>\n'
+        f'⏱ Таймаут: <code>{fmt_timeout()}</code>\n🕒 Кулдаун: <code>{GEN_COOLDOWN}с / Premium {setting("premium_cooldown",str(PREMIUM_COOLDOWN))}с</code>\n'
         f'📊 Курс: <code>1 🪙 = {coin_rate()} ₽</code>\n💸 Реф: <code>L1 {REF_L1}% • L2 {REF_L2}%</code>\n'
         f'⏳ Rate-limit: <code>{rate_limit_count()}/{rate_limit_window()}с</code>\n🎯 Инфлюенсеров: <code>{adv_count}</code>\n'
+        f'💎 Premium активных: <code>{prem_count}</code>\n🚀 Ускорение: <code>{setting("rush_cost",str(RUSH_COST))} 🪙</code>\n'
         f'🖼 Баннеры: <code>{len(banners_have)}/{len(BANNER_KEYS)}</code> (📁{banners_files} • ✅{banners_db} • ⚡{banners_cache})\n'
         f'📡 API: 🖼{apis_img} 🧠{apis_mod}\n🌐 Режим: <code>{"webhook" if PUBLIC_DOMAIN else "polling"}</code>\n🤖 <code>@{BOT_USERNAME}</code>',
         level=1)
@@ -2488,10 +2685,13 @@ def build_app():
     app=(Application.builder().token(BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build())
     app.add_handler(CommandHandler('start',cmd_start))
     app.add_handler(CommandHandler('help',cmd_help))
+    app.add_handler(CommandHandler('premium',cmd_premium))
     app.add_handler(CommandHandler('ref_history',cmd_ref_history))
     app.add_handler(CommandHandler('admin',cmd_admin))
     app.add_handler(CommandHandler('admin_help',cmd_admin_help))
     app.add_handler(CommandHandler('botbalance',cmd_botbalance))
+    app.add_handler(CommandHandler('givepremium',cmd_givepremium))
+    app.add_handler(CommandHandler('unpremium',cmd_unpremium))
     app.add_handler(CommandHandler('stats',cmd_stats))
     app.add_handler(CommandHandler('user',cmd_user))
     app.add_handler(CommandHandler('ticket',cmd_ticket))
