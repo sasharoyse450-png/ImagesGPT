@@ -2,12 +2,14 @@ import asyncio, base64, html, logging, sqlite3, time, uuid, traceback, random, o
 from datetime import datetime, timedelta
 import httpx
 from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, LabeledPrice
+    Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, LabeledPrice,
+    InlineQueryResultArticle, InputTextMessageContent
 )
 from telegram.constants import ParseMode, ChatAction
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
-    CallbackQueryHandler, ContextTypes, filters, PreCheckoutQueryHandler
+    CallbackQueryHandler, ContextTypes, filters, PreCheckoutQueryHandler,
+    InlineQueryHandler
 )
 
 # ═══════════════════════════════════════════════════════════
@@ -20,7 +22,7 @@ API_BASE   = 'https://tooken.club/v1'
 IMAGE_MODEL      = 'gpt-image-2'
 MODERATION_MODEL = 'deepseek-v4-flash'
 TIMEOUT_DEFAULT  = 600
-DB         = 'gptimages.db'
+DB         = os.environ.get('DB_PATH', 'gptimages.db')
 PRIVACY_URL = 'https://telegra.ph/POLITIKA-KONFIDENCIALNOSTI-08-12-99'
 OFFER_URL   = 'https://telegra.ph/PUBLICHNAYA-OFERTA-08-12-15'
 BOT_USERNAME = 'ImagesGPT_bot'
@@ -30,8 +32,21 @@ STAR_RATE = 1.3
 STAR_PACKS = [(10,0),(25,0),(50,5),(100,15)]
 REF_L1 = 10
 REF_L2 = 5
-ROULETTE_COOLDOWN_HOURS = 24
+ROULETTE_MIN_DEPOSIT = 30
 ROULETTE_PRIZES = [(0,20),(1,35),(2,25),(3,12),(5,6),(10,2)]
+
+# 🎯 Инфлюенсеры
+ADV_DEFAULT_PERCENT = 20        # % по adv-ссылке
+
+# 🛡 Анти-абуз для новых юзеров
+NEW_USER_HOURS = 1              # аккаунт считается «новым» N часов после регистрации
+NEW_USER_LIMIT_COUNT = 1        # генераций
+NEW_USER_LIMIT_WINDOW = 300     # за 300 сек (5 мин)
+
+# 🌐 Webhook (на Railway само подхватится)
+PORT = int(os.environ.get('PORT', 8080))
+WEBHOOK_PATH = '/webhook'
+PUBLIC_DOMAIN = os.environ.get('RAILWAY_PUBLIC_DOMAIN')  # выставляется автоматически на Railway
 
 BANNERS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'banners')
 BANNER_KEYS = {
@@ -76,9 +91,9 @@ TR={
 'support_my_title':'📋 <b>Твои тикеты</b>','help_title':'ℹ️ <b>Помощь</b>',
 'help_text':('🎨 <b>Создать изображение</b> — описание → размер → картинка.\n\n'
 '💰 <b>Баланс</b> — рубли и монеты, обмен.\n\n💳 <b>Пополнить</b> — через Telegram Stars.\n\n'
-'🎰 <b>Рулетка</b> — раз в 24 часа крути монеты.\n\n📜 <b>История</b> — список генераций.\n\n'
+'🎰 <b>Рулетка</b> — раз в неделю (при пополнении от {min_dep} ₽).\n\n📜 <b>История</b> — список генераций.\n\n'
 '👥 <b>Пригласить друга</b> — {percent}% с пополнений (2 уровня).\n\n🎁 <b>Промокод</b> — бонусный код.\n\n'
-'🆘 <b>Поддержка</b> — тикет.'),
+'🆘 <b>Поддержка</b> — тикет.\n\n✨ <b>Inline</b> — @{bot} промпт в любом чате.'),
 'insufficient_coins':'❌ Недостаточно монет.','need_coins':'Нужно: <b>{need} 🪙</b>\nУ тебя: <b>{have} 🪙</b>',
 'create_prompt':'🎨 <b>Напиши описание изображения:</b>\n\nМаксимум 4000 символов.',
 'checking':'🔎 Проверяю запрос…','blocked':'❌ <b>Запрос отклонён.</b>','choose_size':'📐 <b>Выбери размер:</b>',
@@ -98,10 +113,19 @@ TR={
 'min_exchange':'Минимум для обмена','you_have':'У тебя','ticket_msg_added':'📩 Сообщение добавлено в тикет #{tid}.',
 'ticket_closed':'🔒 Тикет #{tid} закрыт.','support_reply':'💬 <b>Ответ поддержки (тикет #{tid}):</b>',
 'reply_here':'Ответь сюда, чтобы продолжить.','roulette_title':'🎰 <b>Рулетка</b>',
-'roulette_rules':'Раз в 24 часа бесплатно крути барабан.\n\nВозможные призы: 0, 1, 2, 3, 5, 10 монет.',
+'roulette_rules':('Рулетка доступна <b>раз в неделю</b> (Пн–Вс).\n\n'
+'Условие: пополнение от <b>{min_dep} ₽</b> на этой неделе.\n\n'
+'Возможные призы: <b>0, 1, 2, 3, 5, 10</b> монет.'),
+'roulette_deposit_week':'💵 Пополнено на этой неделе: <b>{amount} ₽</b>',
+'roulette_deposit_need':'📉 Не хватает до {min_dep} ₽: <b>{left} ₽</b>',
 'roulette_spin':'🎰 Крутить','roulette_spinning':'🎰 <b>Крутим…</b>','roulette_won':'🎉 <b>Ты выиграл {n} 🪙!</b>',
-'roulette_empty':'💨 <b>Пусто.</b> Сегодня не повезло.','roulette_cooldown':'⏱ Следующая попытка через <b>{time}</b>',
-'roulette_done':'✅ Приходи через 24 часа!',
+'roulette_empty':'💨 <b>Пусто.</b> Сегодня не повезло.','roulette_done':'✅ Приходи на следующей неделе!',
+'roulette_locked_no_dep':('🔒 <b>Рулетка пока недоступна</b>\n\n'
+'Пополни баланс минимум на <b>{min_dep} ₽</b> на этой неделе, '
+'и получишь шанс крутануть барабан.'),
+'roulette_already_this_week':('✅ Ты уже крутил рулетку на этой неделе.\n\n'
+'Следующая попытка — в понедельник.'),
+'new_user_limit':'🛡 Новый аккаунт — лимит {n} генерация за {m} минут. Попробуй позже.',
 },
 'en':{
 'menu_title':'🤖 <b>ImagesGPT</b>','balance':'💰 Balance','topup':'💳 Top up','history':'📜 History',
@@ -127,9 +151,9 @@ TR={
 'support_create_ask':'✍️ <b>Describe the issue</b> (text or photo):','support_created':'✅ <b>Ticket #{tid} created.</b>',
 'support_none':'📋 You have no tickets yet.','support_my_title':'📋 <b>Your tickets</b>','help_title':'ℹ️ <b>Help</b>',
 'help_text':('🎨 <b>Create image</b> — prompt → size → picture.\n\n💰 <b>Balance</b> — rubles and coins.\n\n'
-'💳 <b>Top up</b> — via Telegram Stars.\n\n🎰 <b>Roulette</b> — free coins every 24h.\n\n'
+'💳 <b>Top up</b> — via Telegram Stars.\n\n🎰 <b>Roulette</b> — once a week (deposit ≥{min_dep} ₽).\n\n'
 '📜 <b>History</b> — list of generations.\n\n👥 <b>Invite a friend</b> — {percent}% of top-ups (2 levels).\n\n'
-'🎁 <b>Promo code</b> — bonus code.\n\n🆘 <b>Support</b> — ticket.'),
+'🎁 <b>Promo code</b> — bonus code.\n\n🆘 <b>Support</b> — ticket.\n\n✨ <b>Inline</b> — @{bot} prompt in any chat.'),
 'insufficient_coins':'❌ Not enough coins.','need_coins':'Needed: <b>{need} 🪙</b>\nYou have: <b>{have} 🪙</b>',
 'create_prompt':'🎨 <b>Write a description:</b>\n\nMax 4000 chars.','checking':'🔎 Checking prompt…',
 'blocked':'❌ <b>Request blocked.</b>','choose_size':'📐 <b>Choose size:</b>','size_1024':'🟦 1024×1024',
@@ -149,10 +173,18 @@ TR={
 'min_exchange':'Minimum for exchange','you_have':'You have','ticket_msg_added':'📩 Message added to ticket #{tid}.',
 'ticket_closed':'🔒 Ticket #{tid} closed.','support_reply':'💬 <b>Support reply (ticket #{tid}):</b>',
 'reply_here':'Reply here to continue.','roulette_title':'🎰 <b>Roulette</b>',
-'roulette_rules':'Free spin every 24 hours.\n\nPossible prizes: 0, 1, 2, 3, 5, 10 coins.',
+'roulette_rules':('Roulette is available <b>once a week</b> (Mon–Sun).\n\n'
+'Requirement: deposit of at least <b>{min_dep} ₽</b> this week.\n\n'
+'Possible prizes: <b>0, 1, 2, 3, 5, 10</b> coins.'),
+'roulette_deposit_week':'💵 Deposited this week: <b>{amount} ₽</b>',
+'roulette_deposit_need':'📉 Need <b>{left} ₽</b> more to reach {min_dep} ₽',
 'roulette_spin':'🎰 Spin','roulette_spinning':'🎰 <b>Spinning…</b>','roulette_won':'🎉 <b>You won {n} 🪙!</b>',
-'roulette_empty':'💨 <b>Empty.</b> No luck today.','roulette_cooldown':'⏱ Next attempt in <b>{time}</b>',
-'roulette_done':'✅ Come back in 24 hours!',
+'roulette_empty':'💨 <b>Empty.</b> No luck today.','roulette_done':'✅ Come back next week!',
+'roulette_locked_no_dep':('🔒 <b>Roulette is locked</b>\n\n'
+'Top up at least <b>{min_dep} ₽</b> this week to unlock a spin.'),
+'roulette_already_this_week':('✅ You already spun the roulette this week.\n\n'
+'Next attempt — on Monday.'),
+'new_user_limit':'🛡 New account — limit {n} generation per {m} min. Try later.',
 },
 }
 
@@ -166,6 +198,9 @@ def db():
         _db=sqlite3.connect(DB,check_same_thread=False)
         _db.row_factory=sqlite3.Row
     return _db
+
+_lang_cache={}
+_settings_cache={}
 
 def init_db():
     c=db()
@@ -195,6 +230,7 @@ def init_db():
             referred_id INTEGER NOT NULL, amount INTEGER NOT NULL, source_topup_id INTEGER, created_at TEXT);
         CREATE TABLE IF NOT EXISTS admins(user_id INTEGER PRIMARY KEY, added_by INTEGER, added_at TEXT);
         CREATE TABLE IF NOT EXISTS banners(key TEXT PRIMARY KEY, file_id TEXT NOT NULL, updated_at TEXT);
+        CREATE TABLE IF NOT EXISTS banners_cache(key TEXT PRIMARY KEY, file_id TEXT NOT NULL, cached_at TEXT);
         CREATE TABLE IF NOT EXISTS apis(id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT NOT NULL, name TEXT,
             base_url TEXT NOT NULL, api_key TEXT NOT NULL, model TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1,
             priority INTEGER NOT NULL DEFAULT 100, created_at TEXT);
@@ -202,6 +238,9 @@ def init_db():
             prize INTEGER NOT NULL, spun_at TEXT);
         CREATE TABLE IF NOT EXISTS stars_payments(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER,
             stars INTEGER, rub INTEGER, charge_id TEXT UNIQUE, created_at TEXT);
+        CREATE TABLE IF NOT EXISTS adv_partners(user_id INTEGER PRIMARY KEY, code TEXT UNIQUE NOT NULL,
+            percent INTEGER NOT NULL DEFAULT 20, created_at TEXT);
+        CREATE TABLE IF NOT EXISTS inline_prompts(id TEXT PRIMARY KEY, user_id INTEGER, prompt TEXT, created_at TEXT);
     ''')
     for stmt in [
         'ALTER TABLE users ADD COLUMN banned INTEGER NOT NULL DEFAULT 0',
@@ -214,6 +253,8 @@ def init_db():
         'ALTER TABLE history ADD COLUMN file_id TEXT','ALTER TABLE history ADD COLUMN elapsed REAL',
         'ALTER TABLE ticket_messages ADD COLUMN photo_file_id TEXT',
         'CREATE INDEX IF NOT EXISTS idx_history_user ON history(user_id, id DESC)',
+        'CREATE INDEX IF NOT EXISTS idx_topups_user_date ON topups(user_id, created_at)',
+        'CREATE INDEX IF NOT EXISTS idx_roulette_user_date ON roulette_spins(user_id, spun_at)',
     ]:
         try: c.execute(stmt)
         except sqlite3.OperationalError: pass
@@ -224,10 +265,14 @@ def init_db():
     c.commit()
 
 def setting(key,default=None):
+    if key in _settings_cache: return _settings_cache[key]
     r=db().execute('SELECT value FROM settings WHERE key=?',(key,)).fetchone()
-    return r['value'] if r else default
+    v=r['value'] if r else default
+    if v is not None: _settings_cache[key]=v
+    return v
 def set_setting(key,value):
     c=db(); c.execute('INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)',(key,str(value))); c.commit()
+    _settings_cache[key]=str(value)
 def get_timeout():
     try: return int(setting('timeout',str(TIMEOUT_DEFAULT)))
     except: return TIMEOUT_DEFAULT
@@ -245,31 +290,40 @@ def rate_limit_window():
     except: return 60
 
 # ═══════════════════════════════════════════════════════════
-#  BANNERS (DB + файлы из репозитория)
+#  BANNERS (с кэшем file_id)
 # ═══════════════════════════════════════════════════════════
 def banner_file(key):
     p=os.path.join(BANNERS_DIR,f'{key}.png')
     return p if os.path.isfile(p) else None
-
 def db_has_banner(key):
     return bool(db().execute('SELECT 1 FROM banners WHERE key=?',(key,)).fetchone())
+def banner_cache_get(key):
+    r=db().execute('SELECT file_id FROM banners_cache WHERE key=?',(key,)).fetchone()
+    return r['file_id'] if r else None
+def banner_cache_set(key,fid):
+    c=db(); c.execute('INSERT OR REPLACE INTO banners_cache(key,file_id,cached_at) VALUES(?,?,?)',
+        (key,fid,datetime.now().isoformat(timespec='seconds'))); c.commit()
+def banner_cache_clear(key=None):
+    c=db()
+    if key: c.execute('DELETE FROM banners_cache WHERE key=?',(key,))
+    else: c.execute('DELETE FROM banners_cache')
+    c.commit()
 
 def get_banner(key):
-    """Возвращает ('id', file_id) | ('file', path) | None."""
     r=db().execute('SELECT file_id FROM banners WHERE key=?',(key,)).fetchone()
-    if r: return ('id', r['file_id'])
+    if r: return ('id',r['file_id'])
+    cached=banner_cache_get(key)
+    if cached: return ('id',cached)
     p=banner_file(key)
-    if p: return ('file', p)
+    if p: return ('file',p)
     return None
-
 def set_banner(key,fid):
     c=db(); c.execute('INSERT OR REPLACE INTO banners(key,file_id,updated_at) VALUES(?,?,?)',
         (key,fid,datetime.now().isoformat(timespec='seconds'))); c.commit()
 def delete_banner(key):
     c=db(); c.execute('DELETE FROM banners WHERE key=?',(key,)); c.commit()
-
+    banner_cache_clear(key)
 def list_banners():
-    """Все доступные ключи: из БД + из файлов."""
     have={r['key'] for r in db().execute('SELECT key FROM banners').fetchall()}
     if os.path.isdir(BANNERS_DIR):
         for f in os.listdir(BANNERS_DIR):
@@ -277,14 +331,13 @@ def list_banners():
                 k=f[:-4]
                 if k in BANNER_KEYS: have.add(k)
     return have
-
 def banner_source(key):
-    """Возвращает описание источника для админского UI."""
-    has_db=db_has_banner(key); has_file=bool(banner_file(key))
-    if has_db and has_file: return '✅ БД (перекрывает файл) + 📁 файл в репо'
-    if has_db: return '✅ загружен через бота (БД)'
-    if has_file: return '📁 файл из репозитория'
-    return '⬜ нет'
+    has_db=db_has_banner(key); has_file=bool(banner_file(key)); has_cache=bool(banner_cache_get(key))
+    parts=[]
+    if has_db: parts.append('✅ БД')
+    if has_file: parts.append('📁 файл')
+    if has_cache: parts.append('⚡ кэш')
+    return ' + '.join(parts) if parts else '⬜ нет'
 
 def _strip_header(bkey,text):
     if not bkey: return text
@@ -293,6 +346,27 @@ def _strip_header(bkey,text):
     if len(lines)>=2 and lines[1].strip() and set(lines[1].strip())<={'━'}:
         return '\n'.join(lines[2:]).lstrip('\n')
     return text
+
+async def upload_banner_files(app):
+    """Загружает файлы banners/*.png в Telegram, сохраняя file_id в кэш."""
+    if not os.path.isdir(BANNERS_DIR): return
+    for key in BANNER_KEYS:
+        p=banner_file(key)
+        if not p: continue
+        if db_has_banner(key): continue       # юзер перекрыл через админку
+        if banner_cache_get(key): continue    # уже в кэше
+        try:
+            msg=await app.bot.send_photo(
+                chat_id=ADMIN_ID, photo=open(p,'rb'),
+                caption=f'⬆️ Кэш баннера: <b>{BANNER_KEYS[key]}</b> ({key})',
+                parse_mode=ParseMode.HTML)
+            if msg.photo:
+                banner_cache_set(key, msg.photo[-1].file_id)
+                try: await msg.delete()
+                except: pass
+                log.info('Banner %s → cached', key)
+        except Exception as e:
+            log.warning('banner cache %s: %s', key, e)
 
 # ═══════════════════════════════════════════════════════════
 #  SCREENS
@@ -395,17 +469,35 @@ def add_stars_payment(uid,stars,rub,cid):
 # ═══════════════════════════════════════════════════════════
 #  ROULETTE
 # ═══════════════════════════════════════════════════════════
-def roulette_last(uid):
-    return db().execute('SELECT spun_at FROM roulette_spins WHERE user_id=? ORDER BY id DESC LIMIT 1',(uid,)).fetchone()
-def roulette_can_spin(uid):
-    last=roulette_last(uid)
-    if not last: return True,0
-    try:
-        delta=datetime.now()-datetime.fromisoformat(last['spun_at'])
-        cd=timedelta(hours=ROULETTE_COOLDOWN_HOURS)
-        if delta>=cd: return True,0
-        return False,int((cd-delta).total_seconds())
-    except: return True,0
+def _iso_week_bounds(dt=None):
+    dt=dt or datetime.now()
+    monday=(dt-timedelta(days=dt.weekday())).replace(hour=0,minute=0,second=0,microsecond=0)
+    sunday=monday+timedelta(days=7)-timedelta(seconds=1)
+    return monday,sunday
+def _iso_week_key(dt=None):
+    dt=dt or datetime.now()
+    y,w,_=dt.isocalendar()
+    return f'{y}-W{w:02d}'
+def roulette_deposit_this_week(uid):
+    start,end=_iso_week_bounds()
+    r=db().execute('SELECT COALESCE(SUM(amount),0) AS s FROM topups '
+        'WHERE user_id=? AND amount>0 AND created_at>=? AND created_at<=?',
+        (uid,start.isoformat(timespec='seconds'),end.isoformat(timespec='seconds'))).fetchone()
+    return r['s'] if r else 0
+def roulette_spun_this_week(uid):
+    start,end=_iso_week_bounds()
+    r=db().execute('SELECT 1 FROM roulette_spins WHERE user_id=? AND spun_at>=? AND spun_at<=? LIMIT 1',
+        (uid,start.isoformat(timespec='seconds'),end.isoformat(timespec='seconds'))).fetchone()
+    return bool(r)
+def roulette_status(uid):
+    dep=roulette_deposit_this_week(uid)
+    need=max(0,ROULETTE_MIN_DEPOSIT-dep)
+    week=_iso_week_key()
+    if roulette_spun_this_week(uid):
+        return {'can_spin':False,'reason':'already','deposit':dep,'need':need,'week_key':week}
+    if dep<ROULETTE_MIN_DEPOSIT:
+        return {'can_spin':False,'reason':'no_deposit','deposit':dep,'need':need,'week_key':week}
+    return {'can_spin':True,'reason':'ok','deposit':dep,'need':0,'week_key':week}
 def roulette_spin(uid):
     total=sum(w for _,w in ROULETTE_PRIZES)
     r=random.randint(1,total); acc=0; prize=0
@@ -418,7 +510,7 @@ def roulette_spin(uid):
     return prize
 
 # ═══════════════════════════════════════════════════════════
-#  RATE LIMIT
+#  RATE LIMIT + NEW USER LIMIT
 # ═══════════════════════════════════════════════════════════
 _rate_log={}
 def check_rate(uid):
@@ -427,6 +519,27 @@ def check_rate(uid):
     if len(times)>=limit:
         wait=int(window-(now-times[0]))+1; _rate_log[uid]=times; return False,wait
     times.append(now); _rate_log[uid]=times; return True,0
+
+_new_user_log={}
+def is_new_account(uid):
+    r=db().execute('SELECT created_at FROM users WHERE user_id=?',(uid,)).fetchone()
+    if not r or not r['created_at']: return False
+    try:
+        created=datetime.fromisoformat(r['created_at'])
+        return (datetime.now()-created) < timedelta(hours=NEW_USER_HOURS)
+    except: return False
+
+def check_new_user_limit(uid):
+    """Для новых аккаунтов — жёсткий лимит на генерации. Возвращает (ok, wait)."""
+    if not is_new_account(uid): return True,0
+    now=time.time()
+    times=[x for x in _new_user_log.get(uid,[]) if now-x<NEW_USER_LIMIT_WINDOW]
+    if len(times)>=NEW_USER_LIMIT_COUNT:
+        wait=int(NEW_USER_LIMIT_WINDOW-(now-times[0]))+1
+        _new_user_log[uid]=times
+        return False,wait
+    times.append(now); _new_user_log[uid]=times
+    return True,0
 
 # ═══════════════════════════════════════════════════════════
 #  ADMINS
@@ -442,6 +555,44 @@ def remove_admin(uid):
     c=db(); c.execute('DELETE FROM admins WHERE user_id=?',(uid,)); c.commit(); return True
 def list_admins():
     return db().execute('SELECT user_id, added_by, added_at FROM admins ORDER BY added_at').fetchall()
+
+# ═══════════════════════════════════════════════════════════
+#  ADV PARTNERS (инфлюенсеры)
+# ═══════════════════════════════════════════════════════════
+def adv_get_by_uid(uid):
+    return db().execute('SELECT * FROM adv_partners WHERE user_id=?',(uid,)).fetchone()
+def adv_get_by_code(code):
+    return db().execute('SELECT * FROM adv_partners WHERE code=?',(code,)).fetchone()
+def adv_create(uid, code, percent=None):
+    pct = percent if percent is not None else ADV_DEFAULT_PERCENT
+    c=db()
+    try:
+        c.execute('INSERT INTO adv_partners(user_id,code,percent,created_at) VALUES(?,?,?,?)',
+            (uid, code, pct, datetime.now().isoformat(timespec='seconds')))
+        c.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False
+def adv_delete(code):
+    c=db(); c.execute('DELETE FROM adv_partners WHERE code=?',(code,)); c.commit()
+def adv_list():
+    return db().execute('SELECT * FROM adv_partners ORDER BY created_at DESC').fetchall()
+
+# ═══════════════════════════════════════════════════════════
+#  INLINE PROMPTS
+# ═══════════════════════════════════════════════════════════
+def inline_prompt_save(uid, prompt):
+    sid=uuid.uuid4().hex[:12]
+    c=db(); c.execute('INSERT INTO inline_prompts(id,user_id,prompt,created_at) VALUES(?,?,?,?)',
+        (sid, uid, prompt, datetime.now().isoformat(timespec='seconds'))); c.commit()
+    return sid
+def inline_prompt_get(sid):
+    r=db().execute('SELECT * FROM inline_prompts WHERE id=?',(sid,)).fetchone()
+    return r
+def inline_prompt_purge():
+    """Чистим старые inline-промпты (старше 1 часа)."""
+    cutoff=(datetime.now()-timedelta(hours=1)).isoformat(timespec='seconds')
+    c=db(); c.execute('DELETE FROM inline_prompts WHERE created_at<?',(cutoff,)); c.commit()
 
 # ═══════════════════════════════════════════════════════════
 #  USERS
@@ -534,15 +685,27 @@ def topup_rub(uid,amount,method='manual',by_admin=None):
         cur=c.execute('INSERT INTO topups(user_id,amount,method,created_at,by_admin) VALUES(?,?,?,?,?)',
             (uid,amount,method,now,by_admin)); c.commit()
         tid=cur.lastrowid
-        for lvl,pct in ((1,REF_L1),(2,REF_L2)):
-            ref=referred_by_at_level(uid,lvl)
-            if not ref: continue
+        # L1
+        l1=referred_by_at_level(uid,1)
+        if l1:
+            adv=adv_get_by_uid(l1)
+            pct=adv['percent'] if adv else REF_L1
             bonus=int(amount*pct/100)
-            if bonus<=0: continue
-            c.execute('UPDATE users SET rub_balance=rub_balance+? WHERE user_id=?',(bonus,ref))
-            c.execute('INSERT INTO ref_earnings(referrer_id,referred_id,amount,source_topup_id,created_at) VALUES(?,?,?,?,?)',
-                (ref,uid,bonus,tid,now)); c.commit()
-            payouts.append((ref,lvl,bonus))
+            if bonus>0:
+                c.execute('UPDATE users SET rub_balance=rub_balance+? WHERE user_id=?',(bonus,l1))
+                c.execute('INSERT INTO ref_earnings(referrer_id,referred_id,amount,source_topup_id,created_at) VALUES(?,?,?,?,?)',
+                    (l1,uid,bonus,tid,now)); c.commit()
+                payouts.append((l1,1,bonus))
+            # L2 только если L1 не инфлюенсер
+            if not adv:
+                l2=referred_by_at_level(uid,2)
+                if l2:
+                    bonus2=int(amount*REF_L2/100)
+                    if bonus2>0:
+                        c.execute('UPDATE users SET rub_balance=rub_balance+? WHERE user_id=?',(bonus2,l2))
+                        c.execute('INSERT INTO ref_earnings(referrer_id,referred_id,amount,source_topup_id,created_at) VALUES(?,?,?,?,?)',
+                            (l2,uid,bonus2,tid,now)); c.commit()
+                        payouts.append((l2,2,bonus2))
     return payouts
 def exchange_rub_to_coins(uid,rub):
     rate=coin_rate()
@@ -568,6 +731,8 @@ def ref_stats(uid):
     return total,earned
 def ref_link(uid):
     return f'https://t.me/{BOT_USERNAME}?start=ref_{uid}'
+def adv_link(code):
+    return f'https://t.me/{BOT_USERNAME}?start=adv_{code}'
 def create_promo(code,amount,uses,days=None,by=None):
     now=datetime.now()
     exp=(now+timedelta(days=days)).isoformat(timespec='seconds') if days else None
@@ -628,18 +793,25 @@ def list_open_tickets(limit=30):
     return db().execute('SELECT id,user_id,updated_at FROM tickets WHERE status="open" ORDER BY updated_at DESC LIMIT ?',(limit,)).fetchall()
 
 # ═══════════════════════════════════════════════════════════
-#  KEYBOARDS
+#  I18N helper
 # ═══════════════════════════════════════════════════════════
 def t(uid,key,**kw):
     lang=get_lang(uid); s=TR.get(lang,TR['ru']).get(key) or TR['ru'].get(key) or key
     return s.format(**kw) if kw else s
 def get_lang(uid):
+    if uid in _lang_cache: return _lang_cache[uid]
     r=db().execute('SELECT lang FROM users WHERE user_id=?',(uid,)).fetchone()
-    return r['lang'] if r and r['lang'] in LANGS else 'ru'
+    lang=r['lang'] if r and r['lang'] in LANGS else 'ru'
+    _lang_cache[uid]=lang
+    return lang
 def set_lang(uid,lang):
     if lang not in LANGS: return
     c=db(); c.execute('UPDATE users SET lang=? WHERE user_id=?',(lang,uid)); c.commit()
+    _lang_cache[uid]=lang
 
+# ═══════════════════════════════════════════════════════════
+#  KEYBOARDS
+# ═══════════════════════════════════════════════════════════
 def kb_menu(uid):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(t(uid,'create_btn'),callback_data='create')],
@@ -713,10 +885,13 @@ def kb_ticket_admin(tid):
         InlineKeyboardButton('🔒 Закрыть',callback_data=f'ticket_close:{tid}')]])
 def kb_queue_cancel(uid,jid):
     return InlineKeyboardMarkup([[InlineKeyboardButton(t(uid,'queue_cancel'),callback_data=f'q:cancel:{jid}')]])
-def kb_roulette(uid):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(t(uid,'roulette_spin'),callback_data='roulette:spin')],
-        [InlineKeyboardButton(t(uid,'back_menu'),callback_data='menu')]])
+def kb_roulette(uid, can_spin=True):
+    rows=[]
+    if can_spin:
+        rows.append([InlineKeyboardButton(t(uid,'roulette_spin'),callback_data='roulette:spin')])
+    rows.append([InlineKeyboardButton(t(uid,'topup'),callback_data='topup')])
+    rows.append([InlineKeyboardButton(t(uid,'back_menu'),callback_data='menu')])
+    return InlineKeyboardMarkup(rows)
 def kb_admin():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton('📊 Статистика',callback_data='adm:stats'),
@@ -727,8 +902,14 @@ def kb_admin():
          InlineKeyboardButton('🎁 Промокоды',callback_data='adm:promos')],
         [InlineKeyboardButton('🖼 Баннеры',callback_data='adm:banners'),
          InlineKeyboardButton('📡 API',callback_data='adm:api')],
+        [InlineKeyboardButton('🎯 Инфлюенсеры',callback_data='adm:adv')],
         [InlineKeyboardButton('⚙️ Настройки',callback_data='adm:settings')],
         [InlineKeyboardButton('🔄 Обновить',callback_data='adm:main')]])
+def kb_admin_adv():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('➕ Назначить',callback_data='adm:adv:new')],
+        [InlineKeyboardButton('📋 Список',callback_data='adm:adv:list')],
+        [InlineKeyboardButton('◀️ Назад',callback_data='adm:main')]])
 def kb_admin_banners():
     have=list_banners(); kr=[]
     for k,n in BANNER_KEYS.items():
@@ -781,14 +962,19 @@ def kb_admin_ratelimit():
         [InlineKeyboardButton(f'⏱ Окно: {rate_limit_window()} сек',callback_data='adm:set:rate_limit_window')],
         [InlineKeyboardButton('◀️ Назад',callback_data='adm:settings')]])
 def kb_user_card(uid):
-    u=get_user(uid); banned=bool(u['banned'])
-    return InlineKeyboardMarkup([
+    u=get_user(uid); banned=bool(u['banned']); adv=adv_get_by_uid(uid)
+    rows=[
         [InlineKeyboardButton('💰 Установить монеты',callback_data=f'adm:setbal:{uid}')],
         [InlineKeyboardButton('🪙 Добавить монеты',callback_data=f'adm:addbal:{uid}')],
         [InlineKeyboardButton('💵 Начислить рубли',callback_data=f'adm:addrub:{uid}')],
         [InlineKeyboardButton('🚫 Разбанить' if banned else '⛔ Забанить',callback_data=f'adm:userban:{uid}')],
-        [InlineKeyboardButton('📜 История',callback_data=f'adm:hist:{uid}')],
-        [InlineKeyboardButton('◀️ Назад',callback_data='adm:main')]])
+        [InlineKeyboardButton('📜 История',callback_data=f'adm:hist:{uid}')]]
+    if adv:
+        rows.append([InlineKeyboardButton(f'🎯 Инфлюенсер ({adv["percent"]}%) — удалить',callback_data=f'adm:adv:del:{adv["code"]}')])
+    else:
+        rows.append([InlineKeyboardButton('🎯 Назначить инфлюенсером',callback_data=f'adm:adv:mk:{uid}')])
+    rows.append([InlineKeyboardButton('◀️ Назад',callback_data='adm:main')])
+    return InlineKeyboardMarkup(rows)
 def kb_promos_main():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton('➕ Создать промокод',callback_data='adm:promo:new')],
@@ -820,12 +1006,10 @@ ADMIN_HELP=('🛠 <b>Админ-команды</b>\n━━━━━━━━━�
     '⚙️ <code>/setcost N</code> • <code>/setrate N</code> • <code>/setref N</code> • <code>/settimeout N</code>\n\n'
     '🖼 <code>/setbanner KEY</code> • <code>/banners</code> • <code>/delbanner KEY</code>\n\n'
     '📡 <code>/apis</code>\n\n'
+    '🎯 <code>/setadv ID CODE [PCT]</code> • <code>/deladv CODE</code> • <code>/advs</code>\n\n'
     '👑 <code>/setadmin ID</code> • <code>/unadmin ID</code> • <code>/admins</code>\n\n'
     '📢 <code>/broadcast ТЕКСТ</code> • <code>/ticket ID</code> • <code>/stats</code> • <code>/admin</code>')
 
-# ═══════════════════════════════════════════════════════════
-#  HELPERS / LOGGING
-# ═══════════════════════════════════════════════════════════
 async def alog(app,text,level=2):
     try: cur=int(setting('log_level','2'))
     except: cur=2
@@ -840,11 +1024,6 @@ def fmt_duration(sec):
     if s<60: return f'{s} сек'
     m,s=divmod(s,60)
     if m<60: return f'{m} мин {s} сек'
-    h,m=divmod(m,60); return f'{h} ч {m} мин'
-def fmt_seconds_human(sec):
-    if sec<60: return f'{sec} сек'
-    m,s=divmod(sec,60)
-    if m<60: return f'{m} мин'
     h,m=divmod(m,60); return f'{h} ч {m} мин'
 
 # ═══════════════════════════════════════════════════════════
@@ -1002,6 +1181,8 @@ async def on_successful_payment(update,context):
          f'⭐ Звёзд: <b>{stars}</b>\n💵 Зачислено: <b>{rub} ₽</b>\n')
     if bonus_coins: msg+=f'🎁 Бонус: <b>+{bonus_coins} 🪙</b>\n'
     msg+=f'💵 Баланс: <b>{rub_balance(u.id)} ₽</b>'
+    st=roulette_status(u.id)
+    if st['can_spin']: msg+='\n\n🎰 <b>Рулетка разблокирована на этой неделе!</b>'
     await update.message.reply_text(msg,parse_mode=ParseMode.HTML,reply_markup=kb_menu(u.id))
     for ref,lvl,bonus in payouts:
         try:
@@ -1010,28 +1191,87 @@ async def on_successful_payment(update,context):
     await alog(context.application,f'⭐ <b>Stars</b>\n👤 <code>{u.id}</code> • ⭐ {stars} • 💵 {rub} ₽',level=2)
 
 # ═══════════════════════════════════════════════════════════
+#  INLINE QUERY
+# ═══════════════════════════════════════════════════════════
+async def on_inline_query(update,context):
+    q=update.inline_query
+    query=(q.query or '').strip()
+    if not query or len(query)>500:
+        results=[InlineQueryResultArticle(
+            id='empty',
+            title='Напиши промпт после @бота',
+            description='Например: @ImagesGPT_bot кот в шляпе',
+            input_message_content=InputTextMessageContent('Пустой промпт'),
+        )]
+        await q.answer(results,cache_time=0,is_personal=True)
+        return
+    sid=inline_prompt_save(q.from_user.id, query)
+    url=f'https://t.me/{BOT_USERNAME}?start=iq_{sid}'
+    results=[InlineQueryResultArticle(
+        id=sid,
+        title='🎨 Сгенерировать картинку',
+        description=query[:120],
+        input_message_content=InputTextMessageContent(
+            f'🎨 <b>Хочу сгенерировать:</b>\n{html.escape(query[:400])}',
+            parse_mode=ParseMode.HTML),
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton('🎨 Открыть бота', url=url)
+        ]]),
+    )]
+    await q.answer(results,cache_time=0,is_personal=True)
+
+# ═══════════════════════════════════════════════════════════
 #  USER HANDLERS
 # ═══════════════════════════════════════════════════════════
 async def cmd_start(update,context):
     u=update.effective_user; ensure_user(u)
+
+    # параметры deep-link
+    prompt_from_inline=None
     if context.args:
         arg=context.args[0]
         if arg.startswith('ref_'):
             try: set_referrer(u.id,int(arg[4:]))
             except ValueError: pass
+        elif arg.startswith('adv_'):
+            code=arg[4:]
+            adv=adv_get_by_code(code)
+            if adv and adv['user_id']!=u.id:
+                set_referrer(u.id, adv['user_id'])
+        elif arg.startswith('iq_'):
+            sid=arg[3:]
+            r=inline_prompt_get(sid)
+            if r:
+                prompt_from_inline=r['prompt']
+
     if is_banned(u.id):
         r=get_user(u.id); reason=r['ban_reason'] or '—'
-        await update.message.reply_text(f'{t(u.id,"banned_title")}\n\n{t(u.id,"banned_reason")}: {html.escape(reason)}',parse_mode=ParseMode.HTML); return
+        await update.message.reply_text(f'{t(u.id,"banned_title")}\n\n{t(u.id,"banned_reason")}: {html.escape(reason)}',parse_mode=ParseMode.HTML)
+        return
     if not has_accepted(u.id):
         terms=TERMS_TPL.format(title=t(u.id,'terms_title'),lead=t(u.id,'terms_lead'),
             privacy=PRIVACY_URL,privacy_t=t(u.id,'terms_privacy'),
             offer=OFFER_URL,offer_t=t(u.id,'terms_offer'),note=t(u.id,'terms_note'))
-        await update.message.reply_text(terms,parse_mode=ParseMode.HTML,reply_markup=kb_terms(u.id),disable_web_page_preview=True); return
+        await update.message.reply_text(terms,parse_mode=ParseMode.HTML,reply_markup=kb_terms(u.id),disable_web_page_preview=True)
+        return
+
+    if prompt_from_inline:
+        context.user_data['prompt']=prompt_from_inline
+        cost=int(setting('image_cost','1'))
+        if balance(u.id)>=cost:
+            await update.message.reply_text(
+                f'🎨 <b>Промпт из inline-режима:</b>\n\n📝 {html.escape(prompt_from_inline[:500])}\n\n📐 <b>Выбери размер:</b>',
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb_sizes(u.id))
+        else:
+            await update.message.reply_text('❌ Недостаточно монет.', reply_markup=kb_menu(u.id))
+        return
+
     await send_screen(update,u.id,'menu',main_text(u.id),kb_menu(u.id))
 
 async def cmd_help(update,context):
     uid=update.effective_user.id
-    text=f'{t(uid,"help_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n'+t(uid,'help_text',percent=ref_percent())
+    text=f'{t(uid,"help_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n'+t(uid,'help_text',percent=ref_percent(),min_dep=ROULETTE_MIN_DEPOSIT,bot=BOT_USERNAME)
     await send_screen(update,uid,'help',text,kb_menu(uid))
 
 async def on_callbacks(update,context):
@@ -1067,31 +1307,42 @@ async def on_callbacks(update,context):
     if d=='menu':
         await show_screen(q,context,uid,'menu',main_text(uid),kb_menu(uid)); return
     if d=='help':
-        text=f'{t(uid,"help_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n'+t(uid,'help_text',percent=ref_percent())
+        text=f'{t(uid,"help_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n'+t(uid,'help_text',percent=ref_percent(),min_dep=ROULETTE_MIN_DEPOSIT,bot=BOT_USERNAME)
         await show_screen(q,context,uid,'help',text,kb_menu(uid)); return
 
     if d=='roulette':
-        can,remain=roulette_can_spin(uid)
-        if not can:
-            txt=(f'{t(uid,"roulette_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n'
-                 f'{t(uid,"roulette_cooldown",time=fmt_seconds_human(remain))}')
-            await show_screen(q,context,uid,None,txt,
-                InlineKeyboardMarkup([[InlineKeyboardButton(t(uid,'back_menu'),callback_data='menu')]])); return
-        txt=(f'{t(uid,"roulette_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n{t(uid,"roulette_rules")}\n\n'
-             f'🪙 {t(uid,"coins")}: <b>{balance(uid)}</b>')
-        await show_screen(q,context,uid,None,txt,kb_roulette(uid)); return
+        st=roulette_status(uid)
+        head=f'{t(uid,"roulette_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n'
+        if st['can_spin']:
+            txt=(head+t(uid,'roulette_rules',min_dep=ROULETTE_MIN_DEPOSIT)+'\n\n'
+                 +t(uid,'roulette_deposit_week',amount=st['deposit'])+'\n\n'
+                 f'🪙 {t(uid,"coins")}: <b>{balance(uid)}</b>')
+            await show_screen(q,context,uid,None,txt,kb_roulette(uid,can_spin=True)); return
+        if st['reason']=='already':
+            txt=(head+t(uid,'roulette_already_this_week')+'\n\n'
+                 +t(uid,'roulette_deposit_week',amount=st['deposit']))
+            await show_screen(q,context,uid,None,txt,kb_roulette(uid,can_spin=False)); return
+        txt=(head+t(uid,'roulette_locked_no_dep',min_dep=ROULETTE_MIN_DEPOSIT)+'\n\n'
+             +t(uid,'roulette_deposit_week',amount=st['deposit'])+'\n'
+             +t(uid,'roulette_deposit_need',min_dep=ROULETTE_MIN_DEPOSIT,left=st['need']))
+        await show_screen(q,context,uid,None,txt,kb_roulette(uid,can_spin=False)); return
     if d=='roulette:spin':
-        can,remain=roulette_can_spin(uid)
-        if not can:
-            await q.answer(t(uid,'roulette_cooldown',time=fmt_seconds_human(remain)),show_alert=True); return
+        st=roulette_status(uid)
+        if not st['can_spin']:
+            if st['reason']=='already':
+                await q.answer(t(uid,'roulette_already_this_week'),show_alert=True)
+            else:
+                await q.answer(t(uid,'roulette_locked_no_dep',min_dep=ROULETTE_MIN_DEPOSIT),show_alert=True)
+            return
         await q.edit_message_text(t(uid,'roulette_spinning'),parse_mode=ParseMode.HTML)
         await asyncio.sleep(1.2)
         prize=roulette_spin(uid)
+        head=f'{t(uid,"roulette_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n'
         if prize>0:
-            txt=(f'{t(uid,"roulette_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n{t(uid,"roulette_won",n=prize)}\n\n'
-                 f'🪙 {t(uid,"coins")}: <b>{balance(uid)}</b>\n\n{t(uid,"roulette_done")}')
+            txt=(head+t(uid,'roulette_won',n=prize)+'\n\n'
+                 f'🪙 {t(uid,"coins")}: <b>{balance(uid)}</b>\n\n'+t(uid,'roulette_done'))
         else:
-            txt=(f'{t(uid,"roulette_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n{t(uid,"roulette_empty")}\n\n{t(uid,"roulette_done")}')
+            txt=(head+t(uid,'roulette_empty')+'\n\n'+t(uid,'roulette_done'))
         await show_screen(q,context,uid,None,txt,kb_menu(uid)); return
 
     if d=='lang':
@@ -1170,11 +1421,17 @@ async def on_callbacks(update,context):
 
     if d=='ref':
         total,earned=ref_stats(uid); percent=ref_percent()
+        adv=adv_get_by_uid(uid)
+        extra=''
+        if adv:
+            extra=(f'\n\n🎯 <b>Инфлюенсер-ссылка</b>\n'
+                   f'<code>{adv_link(adv["code"])}</code>\n'
+                   f'Процент: <b>{adv["percent"]}%</b>')
         text=(f'{t(uid,"ref_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n'
               f'{t(uid,"ref_your_link")}\n<code>{ref_link(uid)}</code>\n\n'
               f'{t(uid,"ref_you_get",percent=percent)}\nL1 {REF_L1}% • L2 {REF_L2}%\n'
               f'{t(uid,"ref_earn_rub")}\n\n{t(uid,"ref_invited")}: <b>{total}</b>\n'
-              f'{t(uid,"ref_earned")}: <b>{earned} ₽</b>\n\n{t(uid,"ref_note")}')
+              f'{t(uid,"ref_earned")}: <b>{earned} ₽</b>\n\n{t(uid,"ref_note")}{extra}')
         kb=InlineKeyboardMarkup([
             [InlineKeyboardButton(t(uid,'ref_share'),url=f'https://t.me/share/url?url={ref_link(uid)}&text=ImagesGPT')],
             [InlineKeyboardButton(t(uid,'back_menu'),callback_data='menu')]])
@@ -1249,9 +1506,16 @@ async def on_callbacks(update,context):
         return
 
     if d=='create':
+        # rate limit
         ok,wait=check_rate(uid)
         if not ok:
             await show_screen(q,context,uid,'menu',t(uid,'rate_limit',sec=wait),kb_menu(uid)); return
+        # new user limit
+        ok2,wait2=check_new_user_limit(uid)
+        if not ok2:
+            await show_screen(q,context,uid,'menu',
+                t(uid,'new_user_limit',n=NEW_USER_LIMIT_COUNT,m=NEW_USER_LIMIT_WINDOW//60),
+                kb_menu(uid)); return
         cost=int(setting('image_cost','1'))
         if balance(uid)<cost:
             text=f'{t(uid,"insufficient_coins")}\n\n{t(uid,"need_coins",need=cost,have=balance(uid))}'
@@ -1327,6 +1591,49 @@ async def on_message(update,context):
         set_banner(key,photo)
         await update.message.reply_text(f'✅ Баннер <b>{BANNER_KEYS.get(key,key)}</b> сохранён в БД (перекрывает файл).',
             parse_mode=ParseMode.HTML,reply_markup=kb_banner_actions(key)); return
+
+    # admin: adv wizard
+    if is_admin(uid) and context.user_data.get('admin_adv_step'):
+        step=context.user_data['admin_adv_step']
+        data=context.user_data.get('admin_adv_data',{})
+        if step=='uid':
+            try: target=int(text)
+            except ValueError: await update.message.reply_text('❌ ID должен быть числом.'); return
+            if not get_user(target):
+                await update.message.reply_text('❌ Пользователь не найден.'); return
+            data['uid']=target; context.user_data['admin_adv_data']=data
+            context.user_data['admin_adv_step']='code'
+            await update.message.reply_text(f'✅ ID: <code>{target}</code>\n\n🎯 Код (латиница/цифры, без пробелов):',parse_mode=ParseMode.HTML); return
+        if step=='code':
+            code=text.lower().replace(' ','')
+            if not code or len(code)>30:
+                await update.message.reply_text('❌ 1–30 символов.'); return
+            if adv_get_by_code(code):
+                await update.message.reply_text('❌ Такой код уже есть.'); return
+            data['code']=code; context.user_data['admin_adv_data']=data
+            context.user_data['admin_adv_step']='percent'
+            await update.message.reply_text(f'✅ Код: <code>{code}</code>\n\n💰 Процент (по умолчанию {ADV_DEFAULT_PERCENT}, отправь «-»):',parse_mode=ParseMode.HTML); return
+        if step=='percent':
+            pct=ADV_DEFAULT_PERCENT
+            if text.strip()!='-':
+                try: pct=int(text)
+                except ValueError: await update.message.reply_text('❌ Число или «-».'); return
+                if pct<1 or pct>50:
+                    await update.message.reply_text('❌ 1–50%.'); return
+            uid_target=data['uid']; code=data['code']
+            if adv_create(uid_target,code,pct):
+                await update.message.reply_text(
+                    f'✅ Инфлюенсер назначен\n\n'
+                    f'👤 <code>{uid_target}</code>\n'
+                    f'🎯 Код: <code>{code}</code>\n'
+                    f'💸 Процент: <b>{pct}%</b>\n'
+                    f'🔗 Ссылка: <code>{adv_link(code)}</code>',
+                    parse_mode=ParseMode.HTML,reply_markup=kb_admin_adv())
+            else:
+                await update.message.reply_text('❌ Ошибка создания.')
+            context.user_data.pop('admin_adv_step',None)
+            context.user_data.pop('admin_adv_data',None)
+            return
 
     if is_admin(uid) and context.user_data.get('admin_api_step'):
         step=context.user_data['admin_api_step']
@@ -1565,12 +1872,18 @@ async def show_user_card(message,uid):
     u=get_user(uid)
     if not u: await message.reply_text('❌'); return
     total,earned=ref_stats(uid); is_adm='👑 да' if is_admin(uid) else 'нет'
+    st=roulette_status(uid)
+    rl={'ok':'доступна','already':'уже крутил','no_deposit':'мало депозита'}[st['reason']]
+    adv=adv_get_by_uid(uid)
+    adv_line=f'\n🎯 Инфлюенсер: <b>{adv["code"]}</b> ({adv["percent"]}%)' if adv else ''
     txt=(f'👤 <b>Пользователь</b>\n━━━━━━━━━━━━━━━━━━━━\n'
         f'🆔 <code>{u["user_id"]}</code>\n📛 {html.escape(u["full_name"] or "—")}\n'
         f'🔗 @{u["username"] or "—"}\n🌐 {u["lang"] or "ru"}\n'
         f'💵 Рубли: <b>{u["rub_balance"]} ₽</b>\n🪙 Монеты: <b>{u["balance"]}</b>\n'
         f'👑 Админ: {is_adm}\n📅 Регистрация: {u["created_at"]}\n👀 Последний визит: {u["last_seen"]}\n'
         f'👥 Пригласил: {total} • заработал: {earned} ₽\n'
+        f'🎰 Рулетка ({st["week_key"]}): <b>{rl}</b> • деп: {st["deposit"]} ₽'
+        f'{adv_line}\n'
         f'🚫 Бан: {"да — " + html.escape(u["ban_reason"] or "") if u["banned"] else "нет"}')
     await message.reply_text(txt,parse_mode=ParseMode.HTML,reply_markup=kb_user_card(uid))
 
@@ -1589,6 +1902,7 @@ async def handle_admin_cb(q,context,d):
         tsum=c.execute('SELECT COALESCE(SUM(amount),0) AS s FROM topups').fetchone()['s']
         rsum=c.execute('SELECT COALESCE(SUM(amount),0) AS s FROM ref_earnings').fetchone()['s']
         admins_count=c.execute('SELECT COUNT(*) AS n FROM admins').fetchone()['n']+1
+        adv_count=c.execute('SELECT COUNT(*) AS n FROM adv_partners').fetchone()['n']
         avg,mn,mx,cnt=gen_time_stats()
         tline=''
         if cnt:
@@ -1596,6 +1910,7 @@ async def handle_admin_cb(q,context,d):
                    f'   • мин: {fmt_duration(mn)} • макс: {fmt_duration(mx)}\n   • замеров: {cnt}\n')
         txt=('📊 <b>Статистика</b>\n━━━━━━━━━━━━━━━━━━━━\n\n'
             f'👥 Пользователей: <b>{users}</b>\n👑 Админов: <b>{admins_count}</b>\n'
+            f'🎯 Инфлюенсеров: <b>{adv_count}</b>\n'
             f'🚫 Забанено: <b>{banned}</b>\n🆘 Открытых тикетов: <b>{opent}</b>\n\n'
             f'💵 Пополнений: <b>{tsum} ₽</b>\n💸 Реф-выплат: <b>{rsum} ₽</b>\n\n'
             f'🎨 Генераций: <b>{gens}</b>\n✅ Успешно: <b>{ok}</b>\n❌ Ошибок: <b>{err}</b>\n'
@@ -1660,8 +1975,41 @@ async def handle_admin_cb(q,context,d):
             lines.append(f'   ⏰ {r["banned_at"]}\n   💬 {html.escape(r["ban_reason"] or "—")}')
         await q.edit_message_text('\n'.join(lines),parse_mode=ParseMode.HTML,reply_markup=kb_admin()); return
 
+    # ── adv partners ──
+    if d=='adm:adv':
+        await q.edit_message_text('🎯 <b>Инфлюенсеры</b>\n━━━━━━━━━━━━━━━━━━━━\n\n'
+            f'Всего: <b>{len(adv_list())}</b>\n'
+            f'Дефолтный процент: <b>{ADV_DEFAULT_PERCENT}%</b>',
+            parse_mode=ParseMode.HTML,reply_markup=kb_admin_adv()); return
+    if d=='adm:adv:new':
+        context.user_data['admin_adv_step']='uid'
+        context.user_data['admin_adv_data']={}
+        await q.edit_message_text('🎯 <b>Назначение инфлюенсера</b>\n\n<b>Шаг 1/3.</b> Отправь ID пользователя:',
+            parse_mode=ParseMode.HTML); return
+    if d=='adm:adv:list':
+        rows=adv_list()
+        if not rows:
+            await q.edit_message_text('📋 Список пуст.',reply_markup=kb_admin_adv()); return
+        lines=['🎯 <b>Инфлюенсеры</b>','━━━━━━━━━━━━━━━━━━━━','']
+        for r in rows:
+            lines.append(f'👤 <code>{r["user_id"]}</code> • <code>{r["code"]}</code> • {r["percent"]}%')
+            lines.append(f'   🔗 <code>{adv_link(r["code"])}</code>')
+        await q.edit_message_text('\n'.join(lines),parse_mode=ParseMode.HTML,reply_markup=kb_admin_adv()); return
+    if d.startswith('adm:adv:mk:'):
+        tail=d.split(':',3)[3]
+        if not tail.isdigit(): await q.edit_message_text('❌'); return
+        uid=int(tail)
+        context.user_data['admin_adv_step']='code'
+        context.user_data['admin_adv_data']={'uid':uid}
+        await q.edit_message_text(f'🎯 ID: <code>{uid}</code>\n\n🎯 Код (латиница/цифры, без пробелов):',parse_mode=ParseMode.HTML); return
+    if d.startswith('adm:adv:del:'):
+        code=d.split(':',3)[3]
+        adv_delete(code)
+        await q.edit_message_text(f'✅ Инфлюенсер <code>{code}</code> удалён.',
+            parse_mode=ParseMode.HTML,reply_markup=kb_admin_adv()); return
+
     if d=='adm:banners':
-        await q.edit_message_text('🖼 <b>Баннеры экранов</b>\n━━━━━━━━━━━━━━━━━━━━\n\n✅ — загружен, ⬜ — нет.\n📁 — есть файл в репо, ✅ — загружен через бота.\n\n<i>Рекомендую 1280×640 или 1024×512.</i>',
+        await q.edit_message_text('🖼 <b>Баннеры экранов</b>\n━━━━━━━━━━━━━━━━━━━━\n\n✅ — загружен, ⬜ — нет.\n📁 — файл в репо, ⚡ — закэширован.\n\n<i>Рекомендую 1280×640 или 1024×512.</i>',
             parse_mode=ParseMode.HTML,reply_markup=kb_admin_banners()); return
     if d.startswith('adm:ban:view:'):
         key=d.split(':',3)[3]; name=BANNER_KEYS.get(key,key)
@@ -1781,12 +2129,14 @@ async def cmd_stats(update,context):
     opent=c.execute('SELECT COUNT(*) AS n FROM tickets WHERE status="open"').fetchone()['n']
     tsum=c.execute('SELECT COALESCE(SUM(amount),0) AS s FROM topups').fetchone()['s']
     admins_count=c.execute('SELECT COUNT(*) AS n FROM admins').fetchone()['n']+1
+    adv_count=c.execute('SELECT COUNT(*) AS n FROM adv_partners').fetchone()['n']
     avg,mn,mx,cnt=gen_time_stats()
     tline=f'\n⏱ Средн. генерация: {fmt_duration(avg)} ({cnt})' if cnt else ''
     await update.message.reply_text(
-        f'📊 Пользователей: {users}\n👑 Админов: {admins_count}\n🎨 Генераций: {gens}\n'
-        f'🆘 Открытых: {opent}\n💵 Пополнений: {tsum} ₽\n⏱ Таймаут: {get_timeout()} сек\n'
+        f'📊 Пользователей: {users}\n👑 Админов: {admins_count}\n🎯 Инфлюенсеров: {adv_count}\n'
+        f'🎨 Генераций: {gens}\n🆘 Открытых: {opent}\n💵 Пополнений: {tsum} ₽\n⏱ Таймаут: {get_timeout()} сек\n'
         f'📊 Курс: 1 🪙 = {coin_rate()} ₽\n💸 Реф: L1 {REF_L1}% • L2 {REF_L2}%'
+        f'\n🎰 Рулетка: раз в неделю при депозите ≥{ROULETTE_MIN_DEPOSIT} ₽'
         f'\n⏳ Rate: {rate_limit_count()}/{rate_limit_window()}с{tline}')
 async def cmd_user(update,context):
     if not is_admin(update.effective_user.id) or not context.args:
@@ -1941,18 +2291,17 @@ async def cmd_setbanner(update,context):
     if not is_admin(uid): return
     if not context.args:
         keys_list='\n'.join(f'• <code>{k}</code> — {v}' for k,v in BANNER_KEYS.items())
-        await update.message.reply_text(f'🖼 <b>Баннеры</b>\n\nИспользование: <code>/setbanner KEY</code>\n\n<b>Ключи:</b>\n{keys_list}\n\n<i>Файлы по умолчанию: помести banners/KEY.png в репозиторий.</i>',parse_mode=ParseMode.HTML); return
+        await update.message.reply_text(f'🖼 <b>Баннеры</b>\n\nИспользование: <code>/setbanner KEY</code>\n\n<b>Ключи:</b>\n{keys_list}\n\n<i>Файлы по умолчанию: banners/KEY.png в репозитории.</i>',parse_mode=ParseMode.HTML); return
     key=context.args[0].lower()
     if key not in BANNER_KEYS:
         await update.message.reply_text(f'❌ Ключ <code>{key}</code> не найден.',parse_mode=ParseMode.HTML); return
     context.user_data['admin_banner_upload']=key
-    await update.message.reply_text(f'📤 Пришли картинку для баннера <b>{BANNER_KEYS[key]}</b>.\n<i>Сохраню в БД, перекрывая файл из репо.</i>',parse_mode=ParseMode.HTML)
+    await update.message.reply_text(f'📤 Пришли картинку для баннера <b>{BANNER_KEYS[key]}</b>.',parse_mode=ParseMode.HTML)
 async def cmd_banners(update,context):
     if not is_admin(update.effective_user.id): return
     lines=['🖼 <b>Баннеры экранов</b>','━━━━━━━━━━━━━━━━━━━━','']
     for k,n in BANNER_KEYS.items():
-        src=banner_source(k)
-        lines.append(f'<code>{k}</code> — {n}\n   {src}')
+        lines.append(f'<code>{k}</code> — {n}\n   {banner_source(k)}')
     lines.append(''); lines.append('<i>Управление: /admin → 🖼 Баннеры</i>')
     await update.message.reply_text('\n'.join(lines),parse_mode=ParseMode.HTML)
 async def cmd_delbanner(update,context):
@@ -1961,7 +2310,7 @@ async def cmd_delbanner(update,context):
     key=context.args[0].lower()
     if key not in BANNER_KEYS: await update.message.reply_text('❌ Неизвестный ключ.'); return
     delete_banner(key)
-    await update.message.reply_text(f'❌ Баннер <b>{BANNER_KEYS[key]}</b> удалён из БД. Источник: {banner_source(key)}',parse_mode=ParseMode.HTML)
+    await update.message.reply_text(f'❌ Баннер <b>{BANNER_KEYS[key]}</b> удалён. Источник: {banner_source(key)}',parse_mode=ParseMode.HTML)
 async def cmd_apis(update,context):
     if not is_admin(update.effective_user.id): return
     rows=api_list()
@@ -1974,30 +2323,88 @@ async def cmd_apis(update,context):
         lines.append(f'   🌐 <code>{html.escape(r["base_url"])}</code>')
         lines.append(f'   🎨 <code>{html.escape(r["model"])}</code>')
     await update.message.reply_text('\n'.join(lines),parse_mode=ParseMode.HTML)
+async def cmd_setadv(update,context):
+    if not is_admin(update.effective_user.id): return
+    if len(context.args)<2:
+        await update.message.reply_text('Использование: /setadv ID CODE [PERCENT]'); return
+    try: uid=int(context.args[0])
+    except ValueError: await update.message.reply_text('❌'); return
+    code=context.args[1].lower().replace(' ','')
+    if not code or len(code)>30:
+        await update.message.reply_text('❌ 1–30 символов.'); return
+    if adv_get_by_code(code):
+        await update.message.reply_text('❌ Такой код уже есть.'); return
+    pct=ADV_DEFAULT_PERCENT
+    if len(context.args)>=3:
+        try: pct=int(context.args[2])
+        except ValueError: await update.message.reply_text('❌ Процент — число.'); return
+        if pct<1 or pct>50: await update.message.reply_text('❌ 1–50%.'); return
+    ensure_user_by_id(uid)
+    if adv_create(uid,code,pct):
+        await update.message.reply_text(
+            f'✅ Инфлюенсер назначен\n\n👤 <code>{uid}</code>\n🎯 Код: <code>{code}</code>\n'
+            f'💸 Процент: <b>{pct}%</b>\n🔗 <code>{adv_link(code)}</code>',
+            parse_mode=ParseMode.HTML)
+    else:
+        await update.message.reply_text('❌ Ошибка создания.')
+async def cmd_deladv(update,context):
+    if not is_admin(update.effective_user.id): return
+    if not context.args:
+        await update.message.reply_text('/deladv CODE'); return
+    code=context.args[0].lower()
+    adv_delete(code)
+    await update.message.reply_text(f'✅ <code>{code}</code> удалён.',parse_mode=ParseMode.HTML)
+async def cmd_advs(update,context):
+    if not is_admin(update.effective_user.id): return
+    rows=adv_list()
+    if not rows:
+        await update.message.reply_text('🎯 Список пуст.'); return
+    lines=['🎯 <b>Инфлюенсеры</b>','━━━━━━━━━━━━━━━━━━━━','']
+    for r in rows:
+        lines.append(f'👤 <code>{r["user_id"]}</code> • <code>{r["code"]}</code> • {r["percent"]}%')
+        lines.append(f'   🔗 <code>{adv_link(r["code"])}</code>')
+    await update.message.reply_text('\n'.join(lines),parse_mode=ParseMode.HTML)
 
 # ═══════════════════════════════════════════════════════════
 #  LIFECYCLE
 # ═══════════════════════════════════════════════════════════
 async def post_init(app):
     init_db()
+    # прогрев кэша настроек
+    setting('image_cost'); setting('coin_rate'); setting('ref_percent')
+    setting('timeout'); setting('rate_limit_count'); setting('rate_limit_window')
+    setting('start_balance'); setting('max_concurrent')
+
     n=int(setting('max_concurrent','1'))
     for _ in range(n): workers.append(asyncio.create_task(worker(app)))
     workers.append(asyncio.create_task(queue_position_updater(app)))
+
+    # загрузка баннеров-файлов в Telegram (для быстрого file_id)
+    await upload_banner_files(app)
+    inline_prompt_purge()
+
     banners_have=list_banners()
     banners_files=sum(1 for k in BANNER_KEYS if banner_file(k))
     banners_db=sum(1 for k in BANNER_KEYS if db_has_banner(k))
+    banners_cache=sum(1 for k in BANNER_KEYS if banner_cache_get(k))
     apis_img=len(api_list('image')); apis_mod=len(api_list('mod'))
+    adv_count=len(adv_list())
     await alog(app,
         f'🟢 <b>ImagesGPT запущен</b>\n👷 Воркеров: <code>{n}</code>\n'
         f'🎨 <code>{IMAGE_MODEL}</code>\n⏱ Таймаут: <code>{fmt_timeout()}</code>\n'
         f'📊 Курс: <code>1 🪙 = {coin_rate()} ₽</code>\n💸 Реф: <code>L1 {REF_L1}% • L2 {REF_L2}%</code>\n'
         f'⏳ Rate-limit: <code>{rate_limit_count()}/{rate_limit_window()}с</code>\n'
-        f'🖼 Баннеры: доступно <code>{len(banners_have)}/{len(BANNER_KEYS)}</code> (📁{banners_files} • ✅{banners_db})\n'
-        f'📡 API: 🖼{apis_img} 🧠{apis_mod}',level=1)
+        f'🎯 Инфлюенсеров: <code>{adv_count}</code>\n'
+        f'🖼 Баннеры: <code>{len(banners_have)}/{len(BANNER_KEYS)}</code> (📁{banners_files} • ✅{banners_db} • ⚡{banners_cache})\n'
+        f'📡 API: 🖼{apis_img} 🧠{apis_mod}\n'
+        f'🌐 Режим: <code>{"webhook" if PUBLIC_DOMAIN else "polling"}</code>',
+        level=1)
+
 async def post_shutdown(app):
     for w in workers: w.cancel()
     await asyncio.gather(*workers,return_exceptions=True)
     if _db is not None: _db.close()
+
 async def on_error(update,context):
     log.error('Ошибка в хендлере: %s',context.error,exc_info=context.error)
     try:
@@ -2032,8 +2439,12 @@ def build_app():
     app.add_handler(CommandHandler('banners',cmd_banners))
     app.add_handler(CommandHandler('delbanner',cmd_delbanner))
     app.add_handler(CommandHandler('apis',cmd_apis))
+    app.add_handler(CommandHandler('setadv',cmd_setadv))
+    app.add_handler(CommandHandler('deladv',cmd_deladv))
+    app.add_handler(CommandHandler('advs',cmd_advs))
     app.add_handler(PreCheckoutQueryHandler(pre_checkout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT,on_successful_payment))
+    app.add_handler(InlineQueryHandler(on_inline_query))
     app.add_handler(CallbackQueryHandler(on_callbacks))
     app.add_handler(MessageHandler((filters.TEXT & ~filters.COMMAND) | filters.PHOTO,on_message))
     app.add_error_handler(on_error)
@@ -2041,7 +2452,22 @@ def build_app():
 
 def run_once():
     app=build_app()
-    app.run_polling(allowed_updates=Update.ALL_TYPES,drop_pending_updates=False)
+    if PUBLIC_DOMAIN:
+        # Webhook-режим
+        webhook_url=f'https://{PUBLIC_DOMAIN}{WEBHOOK_PATH}'
+        log.info('Webhook: %s', webhook_url)
+        app.run_webhook(
+            listen='0.0.0.0',
+            port=PORT,
+            url_path=WEBHOOK_PATH,
+            webhook_url=webhook_url,
+            drop_pending_updates=False,
+            allowed_updates=Update.ALL_TYPES,
+        )
+    else:
+        # Polling (локально)
+        log.info('Polling mode (no RAILWAY_PUBLIC_DOMAIN)')
+        app.run_polling(allowed_updates=Update.ALL_TYPES,drop_pending_updates=False)
 
 def main_loop():
     last_error=None; same_error_count=0; MAX_SAME=5
