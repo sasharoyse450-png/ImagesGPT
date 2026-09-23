@@ -26,7 +26,7 @@ TIMEOUT_DEFAULT  = 600
 DB         = os.environ.get('DB_PATH', 'gptimages.db')
 PRIVACY_URL = 'https://telegra.ph/POLITIKA-KONFIDENCIALNOSTI-08-12-99'
 OFFER_URL   = 'https://telegra.ph/PUBLICHNAYA-OFERTA-08-12-15'
-BOT_USERNAME = 'ImagesGPT_bot'
+BOT_USERNAME = 'ImagesGPTbot'
 HISTORY_PAGE_SIZE = 10
 CAPTION_MAX = 1000
 STAR_RATE = 1.3
@@ -795,9 +795,13 @@ def ref_link(uid):
     return f'https://t.me/{BOT_USERNAME}?start=ref_{uid}'
 def adv_link(code):
     return f'https://t.me/{BOT_USERNAME}?start=adv_{code}'
-def share_bot_url():
-    text=quote(f'Зацени что я сделал в @{BOT_USERNAME}!')
-    return f'https://t.me/share/url?url=https://t.me/{BOT_USERNAME}&text={text}'
+
+def share_bot_url(uid):
+    """Реф-ссылка для шеринга — кто перейдёт, станет рефералом uid."""
+    ref=f'https://t.me/{BOT_USERNAME}?start=ref_{uid}'
+    text=quote(f'Зацени что я сделал в @{BOT_USERNAME}! Попробуй тоже 👇')
+    return f'https://t.me/share/url?url={ref}&text={text}'
+
 def create_promo(code,amount,uses,days=None,by=None):
     now=datetime.now()
     exp=(now+timedelta(days=days)).isoformat(timespec='seconds') if days else None
@@ -888,13 +892,12 @@ def kb_menu(uid):
          InlineKeyboardButton(t(uid,'ref'),callback_data='ref')],
         [InlineKeyboardButton(t(uid,'support'),callback_data='support'),
          InlineKeyboardButton(t(uid,'help'),callback_data='help')],
-        [InlineKeyboardButton('📤 '+t(uid,'share_btn').split(' ',1)[-1], url=share_bot_url())],
         [InlineKeyboardButton(t(uid,'lang'),callback_data='lang')],
     ])
 
 def kb_done(uid):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(t(uid,'share_btn'),url=share_bot_url())],
+        [InlineKeyboardButton(t(uid,'share_btn'),url=share_bot_url(uid))],
         [InlineKeyboardButton(t(uid,'create_btn'),callback_data='create')],
         [InlineKeyboardButton(t(uid,'balance'),callback_data='balance'),
          InlineKeyboardButton(t(uid,'history'),callback_data='history')],
@@ -902,9 +905,9 @@ def kb_done(uid):
     ])
 
 def kb_done_inline(uid):
+    """Для инлайн-генерации в группе. Только кнопка «Поделиться» — без ссылок на бота."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(t(uid,'share_btn'),url=share_bot_url())],
-        [InlineKeyboardButton(t(uid,'create_btn'),url=f'https://t.me/{BOT_USERNAME}')],
+        [InlineKeyboardButton(t(uid,'share_btn'),url=share_bot_url(uid))],
     ])
 
 def kb_balance(uid):
@@ -1142,7 +1145,6 @@ async def moderate(prompt):
     return False,'check_failed'
 
 async def translate_prompt(prompt):
-    """RU → EN для лучшего качества картинок. Если промпт и так на латинице, вернёт как есть."""
     if not prompt: return prompt
     cyr=sum(1 for c in prompt if '\u0400'<=c<='\u04FF')
     if cyr < len(prompt)*0.2:
@@ -1284,8 +1286,7 @@ async def worker(app):
                         inline_message_id=inline_id,
                         media=InputMediaPhoto(
                             media=raw,
-                            caption=(f'{t(uid,"done_title")}\n'
-                                     f'{t(uid,"time_label")}: <b>{els}</b> • 🪙 {balance(uid)}'),
+                            caption=(f'{t(uid,"done_title")} • ⏱ <b>{els}</b>'),
                             parse_mode=ParseMode.HTML),
                         reply_markup=kb_done_inline(uid))
                 except Exception as e:
@@ -1397,15 +1398,17 @@ async def on_inline_query(update,context):
     uid=q.from_user.id
     ensure_user(q.from_user)
 
+    # Пустой запрос — просим написать
     if not query or len(query)>400:
         results=[InlineQueryResultArticle(
             id='empty',
             title='🎨 Напиши промпт после @бота',
-            description='Например: @ImagesGPT_bot кот в шляпе',
+            description='Например: @ImagesGPTbot кот в шляпе',
             input_message_content=InputTextMessageContent(
-                f'Подсказка: напиши @{BOT_USERNAME} и промпт, например «кот в шляпе»'),
+                '🎨 Напиши @ImagesGPTbot и промпт, например «кот в шляпе»'),
         )]
-        await q.answer(results,cache_time=0,is_personal=True); return
+        await q.answer(results,cache_time=0,is_personal=True)
+        return
 
     cost=int(setting('image_cost','1'))
     bal=balance(uid)
@@ -1415,9 +1418,10 @@ async def on_inline_query(update,context):
             title='❌ Недостаточно монет',
             description=f'Нужно {cost} 🪙 • у тебя {bal}',
             input_message_content=InputTextMessageContent(
-                f'❌ Недостаточно монет для генерации.\nОткрой бота: https://t.me/{BOT_USERNAME}'),
+                '❌ Недостаточно монет для генерации. Открой бота: t.me/ImagesGPTbot'),
         )]
-        await q.answer(results,cache_time=0,is_personal=True); return
+        await q.answer(results,cache_time=0,is_personal=True)
+        return
 
     ok,wait=check_rate(uid)
     if not ok:
@@ -1427,7 +1431,8 @@ async def on_inline_query(update,context):
             description=f'Подожди {wait} сек',
             input_message_content=InputTextMessageContent(f'⏱ Подожди {wait} сек'),
         )]
-        await q.answer(results,cache_time=0,is_personal=True); return
+        await q.answer(results,cache_time=0,is_personal=True)
+        return
 
     ok2,wait2=check_new_user_limit(uid)
     if not ok2:
@@ -1437,9 +1442,12 @@ async def on_inline_query(update,context):
             description=f'Попробуй через {wait2} сек',
             input_message_content=InputTextMessageContent(f'🛡 Подожди {wait2} сек'),
         )]
-        await q.answer(results,cache_time=0,is_personal=True); return
+        await q.answer(results,cache_time=0,is_personal=True)
+        return
 
     sid=inline_prompt_save(uid,query)
+    # Единственный результат — placeholder, который бот потом отредактирует в картинку.
+    # Никаких ссылок на бота, никаких кнопок "открыть бота" — сообщение живёт в группе.
     results=[InlineQueryResultArticle(
         id=sid,
         title='🎨 Сгенерировать картинку',
@@ -1451,6 +1459,11 @@ async def on_inline_query(update,context):
     await q.answer(results,cache_time=0,is_personal=True)
 
 async def on_chosen_inline(update,context):
+    """
+    Срабатывает, когда юзер ВЫБРАЛ карточку inline.
+    Бот генерирует картинку и заменяет placeholder в inline_message_id.
+    Ничего в личку не пишется, ничего в группу дополнительно не отправляется.
+    """
     r=update.chosen_inline_result
     if not r: return
     sid=r.result_id
@@ -1744,7 +1757,6 @@ async def on_callbacks(update,context):
             [InlineKeyboardButton(t(uid,'back_menu'),callback_data='menu')]])
         await show_screen(q,context,uid,'ref',text,kb); return
 
-    # ── Выводы реферальных ──
     if d=='refw':
         rb=ref_balance(uid)
         text=(f'{t(uid,"ref_withdraw_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n'
@@ -2145,7 +2157,6 @@ async def on_message(update,context):
 
     waiting=context.user_data.get('waiting')
 
-    # ── Выводы реф-баланса ──
     if waiting=='refw_bal':
         context.user_data.pop('waiting',None)
         try: amount=int(text)
@@ -2401,7 +2412,6 @@ async def handle_admin_cb(q,context,d):
             lines.append(f'   ⏰ {r["banned_at"]}\n   💬 {html.escape(r["ban_reason"] or "—")}')
         await q.edit_message_text('\n'.join(lines),parse_mode=ParseMode.HTML,reply_markup=kb_admin()); return
 
-    # ── adv ──
     if d=='adm:adv':
         await q.edit_message_text('🎯 <b>Инфлюенсеры</b>\n━━━━━━━━━━━━━━━━━━━━\n\n'
             f'Всего: <b>{len(adv_list())}</b>\nДефолтный процент: <b>{ADV_DEFAULT_PERCENT}%</b>',
@@ -2433,7 +2443,6 @@ async def handle_admin_cb(q,context,d):
         await q.edit_message_text(f'✅ Инфлюенсер <code>{code}</code> удалён.',
             parse_mode=ParseMode.HTML,reply_markup=kb_admin_adv()); return
 
-    # ── refw ──
     if d=='adm:refw':
         await q.edit_message_text('💸 <b>Выводы реферальных</b>\n━━━━━━━━━━━━━━━━━━━━\n\nЗаявки на вывод на карту.',
             parse_mode=ParseMode.HTML,reply_markup=kb_admin_refw()); return
@@ -2880,7 +2889,8 @@ async def post_init(app):
         f'🎯 Инфлюенсеров: <code>{adv_count}</code>\n'
         f'🖼 Баннеры: <code>{len(banners_have)}/{len(BANNER_KEYS)}</code> (📁{banners_files} • ✅{banners_db} • ⚡{banners_cache})\n'
         f'📡 API: 🖼{apis_img} 🧠{apis_mod}\n'
-        f'🌐 Режим: <code>{"webhook" if PUBLIC_DOMAIN else "polling"}</code>',
+        f'🌐 Режим: <code>{"webhook" if PUBLIC_DOMAIN else "polling"}</code>\n'
+        f'🤖 Username: <code>@{BOT_USERNAME}</code>',
         level=1)
 
 async def post_shutdown(app):
