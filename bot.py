@@ -32,11 +32,9 @@ NEW_USER_LIMIT_WINDOW=300
 REF_WITHDRAW_TO_BALANCE_MIN=10
 REF_WITHDRAW_TO_CARD_MIN=100
 GEN_COOLDOWN=300
-# 💎 Premium
 PREMIUM_STARS=100
 PREMIUM_DAYS=30
 PREMIUM_COOLDOWN=30
-# 🚀 Ускорение
 RUSH_COST=2
 PORT=int(os.environ.get('PORT',8080))
 WEBHOOK_PATH='/webhook'
@@ -278,7 +276,7 @@ def init_db():
         except sqlite3.OperationalError: pass
     for k,v in {'log_level':'2','max_concurrent':'1','image_cost':'0','start_balance':'10',
         'coin_rate':'2','ref_percent':'10','timeout':str(TIMEOUT_DEFAULT),
-        'rate_limit_count':'10','rate_limit_window':'60',
+        'rate_limit_count':'10','rate_limit_window':'60','auto_translate':'1',
         'premium_stars':str(PREMIUM_STARS),'premium_days':str(PREMIUM_DAYS),
         'premium_cooldown':str(PREMIUM_COOLDOWN),'rush_cost':str(RUSH_COST)}.items():
         c.execute('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)',(k,v))
@@ -570,13 +568,16 @@ def roulette_spin(uid):
 # ═══════════ RATE LIMITS ═══════════
 _rate_log={}
 _gen_cooldown={}
+
 def check_rate(uid):
     limit=rate_limit_count(); window=rate_limit_window(); now=time.time()
     times=[x for x in _rate_log.get(uid,[]) if now-x<window]
     if len(times)>=limit:
         wait=int(window-(now-times[0]))+1; _rate_log[uid]=times; return False,wait
     times.append(now); _rate_log[uid]=times; return True,0
-def check_gen_cooldown(uid):
+
+def can_generate(uid):
+    """Только ПРОВЕРКА кулдауна, ничего не помечает."""
     now=time.time()
     cd=GEN_COOLDOWN
     if is_premium(uid):
@@ -585,8 +586,12 @@ def check_gen_cooldown(uid):
     last=_gen_cooldown.get(uid,0)
     if now-last<cd:
         return False,int(cd-(now-last))+1
-    _gen_cooldown[uid]=now
     return True,0
+
+def mark_generated(uid):
+    """Помечает кулдаун — вызывается ТОЛЬКО при реальном запуске."""
+    _gen_cooldown[uid]=time.time()
+
 _new_user_log={}
 def is_new_account(uid):
     r=db().execute('SELECT created_at FROM users WHERE user_id=?',(uid,)).fetchone()
@@ -882,7 +887,7 @@ def set_lang(uid,lang):
 
 # ═══════════ KEYBOARDS ═══════════
 def kb_menu(uid):
-    rows=[
+    return InlineKeyboardMarkup([
         [InlineKeyboardButton(t(uid,'create_btn'),callback_data='create')],
         [InlineKeyboardButton(t(uid,'premium'),callback_data='premium')],
         [InlineKeyboardButton(t(uid,'balance'),callback_data='balance'),
@@ -893,8 +898,7 @@ def kb_menu(uid):
          InlineKeyboardButton(t(uid,'ref'),callback_data='ref')],
         [InlineKeyboardButton(t(uid,'support'),callback_data='support'),
          InlineKeyboardButton(t(uid,'help'),callback_data='help')],
-        [InlineKeyboardButton(t(uid,'lang'),callback_data='lang')]]
-    return InlineKeyboardMarkup(rows)
+        [InlineKeyboardButton(t(uid,'lang'),callback_data='lang')]])
 def kb_done(uid):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(t(uid,'share_btn'),url=share_bot_url(uid))],
@@ -1042,8 +1046,10 @@ def kb_api_detail(aid):
 def kb_admin_settings():
     ll=setting('log_level','2'); ll_names={'0':'выкл','1':'только ошибки','2':'ошибки + генерации','3':'всё'}
     tmo=get_timeout(); tmo_str=f'{tmo//60} мин' if tmo%60==0 else f'{tmo} сек'
+    tr_on='вкл' if int(setting('auto_translate','1')) else 'выкл'
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f'📝 Логи: {ll_names.get(ll,ll)}',callback_data='adm:log')],
+        [InlineKeyboardButton(f'🌐 Перевод RU→EN: {tr_on}',callback_data='adm:translate')],
         [InlineKeyboardButton(f'🎁 Старт: {setting("start_balance","10")} 🪙',callback_data='adm:set:start_balance')],
         [InlineKeyboardButton(f'👷 Параллельно: {setting("max_concurrent","1")}',callback_data='adm:set:max_concurrent')],
         [InlineKeyboardButton(f'⏱ Таймаут: {tmo_str}',callback_data='adm:set:timeout')],
@@ -1152,25 +1158,38 @@ async def moderate(prompt):
         except Exception as e:
             log.warning('moderate #%s: %s',api.get('id'),e); continue
     return True,''
+
 async def translate_prompt(prompt):
+    """Жёсткий перевод RU→EN. Отбрасывает галлюцинации по длине."""
     if not prompt: return prompt
+    if not int(setting('auto_translate','1')): return prompt
     cyr=sum(1 for c in prompt if '\u0400'<=c<='\u04FF')
     if cyr<len(prompt)*0.2: return prompt
-    sys_msg='Translate the user prompt to English for an image generation model. Preserve style, mood, details. Output ONLY the translation.'
+    sys_msg=('You are a translation tool. Translate the user text from Russian to English '
+             'for an image generation prompt. Keep EVERY detail, name, handle and wording. '
+             'DO NOT add new details. DO NOT change the meaning. DO NOT invent anything. '
+             'DO NOT describe the image. Just translate word-for-word what the user wrote. '
+             'Output ONLY the translated text, no quotes, no explanations, no markup.')
     for api in api_active('mod'):
         try:
             payload={'model':api['model'],'messages':[
                 {'role':'system','content':sys_msg},
-                {'role':'user','content':prompt}],'temperature':0.2}
+                {'role':'user','content':prompt}],'temperature':0}
             headers={'Authorization':'Bearer '+api['api_key'],'Content-Type':'application/json'}
             async with httpx.AsyncClient(timeout=30) as c:
                 r=await c.post(api['base_url']+'/chat/completions',json=payload,headers=headers)
                 r.raise_for_status(); d=r.json()
             out=d['choices'][0]['message']['content'].strip().strip('"').strip("'")
-            if out and 2<len(out)<len(prompt)*4: return out
+            if not out: continue
+            if len(out)>len(prompt)*2.5:
+                log.warning('translate too long (%s->%s) — skip',len(prompt),len(out)); continue
+            if len(out)<len(prompt)*0.4:
+                log.warning('translate too short — skip'); continue
+            return out
         except Exception as e:
             log.warning('translate #%s: %s',api.get('id'),e); continue
     return prompt
+
 async def generate(prompt,size,timeout_sec):
     last=None
     for api in api_active('image'):
@@ -1306,7 +1325,6 @@ async def on_successful_payment(update,context):
     sp=update.message.successful_payment
     cid=sp.telegram_payment_charge_id
     payload=sp.invoice_payload or ''
-    # 💎 Premium
     if payload.startswith('premium:'):
         if stars_payment_exists(cid): return
         try:
@@ -1322,7 +1340,6 @@ async def on_successful_payment(update,context):
             parse_mode=ParseMode.HTML,reply_markup=kb_menu(u.id))
         await alog(context.application,f'💎 <b>Premium</b>\n👤 <code>{u.id}</code> • {days} дн. • ⭐ {stars}',level=2)
         return
-    # 💝 Обычный донат
     if stars_payment_exists(cid): return
     stars=sp.total_amount; rub=int(stars*STAR_RATE)
     add_stars_payment(u.id,stars,rub,cid)
@@ -1356,11 +1373,6 @@ async def on_inline_query(update,context):
     if not ok:
         await q.answer([InlineQueryResultArticle(id='rl',title='⏱ Слишком часто',description=f'Подожди {wait} сек',
             input_message_content=InputTextMessageContent(f'⏱ Подожди {wait} сек'))],cache_time=0,is_personal=True); return
-    ok2,wait2=check_gen_cooldown(uid)
-    if not ok2:
-        await q.answer([InlineQueryResultArticle(id='cd',title='⏱ Кулдаун',
-            description=f'Подожди {fmt_cooldown(wait2)}',
-            input_message_content=InputTextMessageContent(f'⏱ Подожди {fmt_cooldown(wait2)}'))],cache_time=0,is_personal=True); return
     sid=inline_prompt_save(uid,query)
     await q.answer([InlineQueryResultArticle(id=sid,title='🎨 Сгенерировать картинку',description=query[:120],
         input_message_content=InputTextMessageContent(f'🎨 <b>Генерация…</b>\n\n📝 {html.escape(query[:400])}\n\n<i>Обычно 30–90 секунд.</i>',parse_mode=ParseMode.HTML))],
@@ -1383,11 +1395,12 @@ async def on_chosen_inline(update,context):
         try: await context.bot.edit_message_text(inline_message_id=inline_id,text=f'⏱ Подожди {wait} сек.',parse_mode=ParseMode.HTML)
         except: pass
         return
-    ok2,wait2=check_gen_cooldown(uid)
+    ok2,wait2=can_generate(uid)
     if not ok2:
         try: await context.bot.edit_message_text(inline_message_id=inline_id,text=f'⏱ Подожди {fmt_cooldown(wait2)}.',parse_mode=ParseMode.HTML)
         except: pass
         return
+    mark_generated(uid)
     prompt_api=await translate_prompt(prompt)
     async with job_lock:
         pending_jobs.append({'job_id':str(uuid.uuid4()),'uid':uid,'chat':None,'msg_id':None,
@@ -1454,7 +1467,6 @@ async def on_callbacks(update,context):
     q=update.callback_query; await q.answer()
     u=q.from_user; ensure_user(u); uid=u.id; d=q.data
 
-    # 💎 Premium покупка
     if d=='premium:buy':
         stars=int(setting('premium_stars',str(PREMIUM_STARS)))
         days=int(setting('premium_days',str(PREMIUM_DAYS)))
@@ -1463,7 +1475,7 @@ async def on_callbacks(update,context):
             await context.bot.send_invoice(
                 chat_id=q.message.chat_id,
                 title=f'💎 Premium — {days} дн.',
-                description=f'Кулдаун 30 сек + приоритет в очереди. {stars} ⭐ ({rub} ₽).',
+                description=f'Кулдаун {setting("premium_cooldown",str(PREMIUM_COOLDOWN))} сек + приоритет. {stars} ⭐ ({rub} ₽).',
                 payload=f'premium:{uid}:{days}:{stars}',
                 provider_token='',currency='XTR',
                 prices=[LabeledPrice(label=f'Premium {days} дн.',amount=stars)])
@@ -1478,13 +1490,12 @@ async def on_callbacks(update,context):
         cd_prem=int(setting('premium_cooldown',str(PREMIUM_COOLDOWN)))
         if st_prem:
             text=(f'💎 <b>Premium активен</b>\n━━━━━━━━━━━━━━━━━━━━\n\n⏰ Осталось: <b>{days_left} дн.</b>\n\n'
-                  f'✅ Кулдаун: <b>{cd_prem} сек</b> (вместо {GEN_COOLDOWN})\n✅ Приоритет в очереди\n\n'
-                  f'Хочешь продлить?\n💰 <b>{stars} ⭐</b> ({rub} ₽) за {days} дн.')
+                  f'✅ Кулдаун: <b>{cd_prem} сек</b>\n✅ Приоритет в очереди\n\n'
+                  f'Продлить? <b>{stars} ⭐</b> за {days} дн.')
         else:
-            text=(f'💎 <b>Premium</b>\n━━━━━━━━━━━━━━━━━━━━\n\nЧто даёт:\n'
-                  f'🚀 Кулдаун <b>{cd_prem} сек</b> вместо {GEN_COOLDOWN}\n'
-                  f'⏩ Приоритет в очереди\n💎 Бейдж в профиле\n\n'
-                  f'💰 Стоимость: <b>{stars} ⭐</b> ({rub} ₽) за {days} дн.')
+            text=(f'💎 <b>Premium</b>\n━━━━━━━━━━━━━━━━━━━━\n\n'
+                  f'🚀 Кулдаун <b>{cd_prem} сек</b> вместо {GEN_COOLDOWN}\n⏩ Приоритет в очереди\n💎 Бейдж\n\n'
+                  f'💰 <b>{stars} ⭐</b> ({rub} ₽) за {days} дн.')
         await show_screen(q,context,uid,None,text,InlineKeyboardMarkup([
             [InlineKeyboardButton(f'⭐ Купить за {stars} ⭐',callback_data='premium:buy')],
             [InlineKeyboardButton(t(uid,'back_menu'),callback_data='menu')]]))
@@ -1705,7 +1716,6 @@ async def on_callbacks(update,context):
         if not is_admin(uid): return
         await handle_admin_cb(q,context,d); return
 
-    # 🚀 Ускорение
     if d.startswith('q:rush:'):
         jid=d.split(':',2)[2]
         cost=int(setting('rush_cost',str(RUSH_COST)))
@@ -1745,10 +1755,15 @@ async def on_callbacks(update,context):
         return
 
     if d=='create':
+        # дебаунс на быстрые клики
+        now_ts=time.time()
+        if now_ts-context.user_data.get('_last_create',0)<1: return
+        context.user_data['_last_create']=now_ts
+
         ok,wait=check_rate(uid)
         if not ok:
             await show_screen(q,context,uid,'menu',t(uid,'rate_limit',sec=wait),kb_menu(uid)); return
-        ok2,wait2=check_gen_cooldown(uid)
+        ok2,wait2=can_generate(uid)
         if not ok2:
             await show_screen(q,context,uid,'menu',t(uid,'cooldown',time=fmt_cooldown(wait2)),kb_menu(uid)); return
         ok3,wait3=check_new_user_limit(uid)
@@ -1765,15 +1780,48 @@ async def on_callbacks(update,context):
         if not p:
             await show_screen(q,context,uid,'menu','❌',kb_menu(uid)); return
         p_api=context.user_data.get('prompt_api',p)
-        tok=str(uuid.uuid4()); context.user_data['pending']={tok:(p,p_api,d.split(':',1)[1])}
-        text=(f'{t(uid,"confirm_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n📝 {html.escape(p[:500])}\n\n📐 {d.split(":",1)[1]}\n\n')
+        tok=str(uuid.uuid4())
+        context.user_data['pending']={tok:(p,p_api,d.split(':',1)[1])}
+        if p_api!=p:
+            text=(f'{t(uid,"confirm_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n'
+                  f'📝 {html.escape(p[:400])}\n\n'
+                  f'🌐 <b>Перевод (уйдёт в API):</b>\n<i>{html.escape(p_api[:400])}</i>\n\n'
+                  f'📐 {d.split(":",1)[1]}\n\n'
+                  f'<i>Перевод кривой? Жми ❌ и напиши промпт латиницей.</i>')
+        else:
+            text=(f'{t(uid,"confirm_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n'
+                  f'📝 {html.escape(p[:500])}\n\n📐 {d.split(":",1)[1]}\n\n')
         await show_screen(q,context,uid,None,text,kb_confirm(uid,tok)); return
     if d.startswith('ok:'):
-        tok=d[3:]; item=context.user_data.get('pending',{}).pop(tok,None)
+        # дебаунс двойного клика
+        now_ts=time.time()
+        if now_ts-context.user_data.get('_last_ok',0)<3:
+            log.warning('double ok debounced uid=%s',uid); return
+        context.user_data['_last_ok']=now_ts
+
+        tok=d[3:]
+        item=context.user_data.get('pending',{}).pop(tok,None)
         if not item:
-            await show_screen(q,context,uid,'menu','❌',kb_menu(uid)); return
-        p,p_api,size=item; jid=str(uuid.uuid4())
+            await show_screen(q,context,uid,'menu','❌ Запрос устарел.',kb_menu(uid)); return
+
+        # ЕЩЁ РАЗ проверяем кулдаун на случай гонки
+        ok_cd,wait_cd=can_generate(uid)
+        if not ok_cd:
+            await show_screen(q,context,uid,'menu',
+                t(uid,'cooldown',time=fmt_cooldown(wait_cd)),kb_menu(uid)); return
+
+        p,p_api,size=item
         priority=is_premium(uid)
+
+        # защита от дубликатов
+        async with job_lock:
+            for j in pending_jobs:
+                if (not j.get('cancelled')) and j['uid']==uid and j['prompt']==p:
+                    log.warning('duplicate job skipped uid=%s',uid)
+                    await q.answer('Уже в очереди',show_alert=False)
+                    return
+
+        jid=str(uuid.uuid4())
         async with job_lock:
             job={'job_id':jid,'uid':uid,'chat':q.message.chat_id,
                 'prompt':p,'prompt_api':p_api,'size':size,
@@ -1788,6 +1836,10 @@ async def on_callbacks(update,context):
             else:
                 pending_jobs.append(job)
             pos=len([j for j in pending_jobs if not j.get('cancelled') and not j.get('inline')])
+
+        # ФИКСИРУЕМ КУЛДАУН — только теперь
+        mark_generated(uid)
+
         prefix='💎 ' if priority else ''
         text=(f'{t(uid,"queue_title")}\n━━━━━━━━━━━━━━━━━━━━\n\n📐 {size}\n📝 {html.escape(p[:120])}\n\n'
               f'{prefix}{t(uid,"queue_pos")}: <b>{pos}</b>')
@@ -2355,6 +2407,10 @@ async def handle_admin_cb(q,context,d):
         await q.edit_message_text(f'✅ <code>{code}</code> удалён.',parse_mode=ParseMode.HTML,reply_markup=kb_promos_main()); return
     if d=='adm:settings':
         await q.edit_message_text('⚙️ <b>Настройки</b>\n━━━━━━━━━━━━━━━━━━━━',parse_mode=ParseMode.HTML,reply_markup=kb_admin_settings()); return
+    if d=='adm:translate':
+        cur=int(setting('auto_translate','1'))
+        set_setting('auto_translate',0 if cur else 1)
+        await q.edit_message_text('⚙️ <b>Настройки</b>',parse_mode=ParseMode.HTML,reply_markup=kb_admin_settings()); return
     if d=='adm:premium':
         await q.edit_message_text('💎 <b>Premium настройки</b>\n━━━━━━━━━━━━━━━━━━━━',parse_mode=ParseMode.HTML,reply_markup=kb_admin_premium()); return
     if d=='adm:ratelimit':
@@ -2646,7 +2702,7 @@ async def post_init(app):
     init_db()
     setting('image_cost'); setting('coin_rate'); setting('ref_percent')
     setting('timeout'); setting('rate_limit_count'); setting('rate_limit_window')
-    setting('start_balance'); setting('max_concurrent')
+    setting('start_balance'); setting('max_concurrent'); setting('auto_translate')
     setting('premium_stars'); setting('premium_days'); setting('premium_cooldown'); setting('rush_cost')
     n=int(setting('max_concurrent','1'))
     for _ in range(n): workers.append(asyncio.create_task(worker(app)))
@@ -2664,6 +2720,7 @@ async def post_init(app):
         f'🟢 <b>ImagesGPT запущен</b>\n👷 Воркеров: <code>{n}</code>\n🎨 <code>{IMAGE_MODEL}</code>\n'
         f'⏱ Таймаут: <code>{fmt_timeout()}</code>\n🕒 Кулдаун: <code>{GEN_COOLDOWN}с / Premium {setting("premium_cooldown",str(PREMIUM_COOLDOWN))}с</code>\n'
         f'📊 Курс: <code>1 🪙 = {coin_rate()} ₽</code>\n💸 Реф: <code>L1 {REF_L1}% • L2 {REF_L2}%</code>\n'
+        f'🌐 Перевод RU→EN: <code>{"вкл" if int(setting("auto_translate","1")) else "выкл"}</code>\n'
         f'⏳ Rate-limit: <code>{rate_limit_count()}/{rate_limit_window()}с</code>\n🎯 Инфлюенсеров: <code>{adv_count}</code>\n'
         f'💎 Premium активных: <code>{prem_count}</code>\n🚀 Ускорение: <code>{setting("rush_cost",str(RUSH_COST))} 🪙</code>\n'
         f'🖼 Баннеры: <code>{len(banners_have)}/{len(BANNER_KEYS)}</code> (📁{banners_files} • ✅{banners_db} • ⚡{banners_cache})\n'
